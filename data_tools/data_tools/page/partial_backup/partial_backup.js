@@ -28,8 +28,9 @@ class PartialBackupPage {
 						<div class="row">
 							<div class="col-sm-6">
 								<div class="form-group">
-									<label>Filter by App</label>
+									<label>Filter by Apps (Multi-select)</label>
 									<div id="app-filter"></div>
+									<p class="help-box small text-muted">Select one or more apps to filter DocTypes</p>
 								</div>
 							</div>
 							<div class="col-sm-6">
@@ -98,11 +99,12 @@ class PartialBackupPage {
 
 	load_doctypes(app_filter = null, module_filter = null) {
 		if (app_filter) {
-			// Load DocTypes by app
+			// Load DocTypes by app(s)
+			// app_filter can be an array of apps or a single app string
 			frappe.call({
 				method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_doctypes_by_app',
 				args: {
-					app_name: app_filter
+					app_names: Array.isArray(app_filter) ? JSON.stringify(app_filter) : app_filter
 				},
 				callback: (r) => {
 					if (r.message) {
@@ -137,16 +139,17 @@ class PartialBackupPage {
 		this.app_filter = frappe.ui.form.make_control({
 			parent: container,
 			df: {
-				fieldtype: 'Select',
+				fieldtype: 'MultiSelect',
 				fieldname: 'app',
-				options: ['All Apps', ...apps],
-				default: 'All Apps',
+				options: apps.map(app => ({label: app, value: app})),
+				placeholder: 'Select Apps (All if empty)',
 				onchange: () => {
-					const selected_app = this.app_filter.get_value();
-					const app = selected_app === 'All Apps' ? null : selected_app;
+					const selected_apps = this.app_filter.get_value();
+					// If no apps selected, pass null to load all
+					const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
 					const module = this.module_filter ? this.module_filter.get_value() : null;
 					const module_filter = module === 'All Modules' ? null : module;
-					this.load_doctypes(app, module_filter);
+					this.load_doctypes(app_filter, module_filter);
 				}
 			},
 			render_input: true
@@ -166,8 +169,9 @@ class PartialBackupPage {
 				onchange: () => {
 					const selected_module = this.module_filter.get_value();
 					const module = selected_module === 'All Modules' ? null : selected_module;
-					const app = this.app_filter ? this.app_filter.get_value() : null;
-					const app_filter = app === 'All Apps' ? null : app;
+					const selected_apps = this.app_filter ? this.app_filter.get_value() : null;
+					// If no apps selected or empty array, pass null to load all
+					const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
 					this.load_doctypes(app_filter, module);
 				}
 			},

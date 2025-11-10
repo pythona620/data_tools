@@ -52,16 +52,41 @@ def get_apps():
 
 
 @frappe.whitelist()
-def get_doctypes_by_app(app_name):
-	"""Get all DocTypes belonging to a specific app"""
-	if not app_name:
+def get_doctypes_by_app(app_names):
+	"""Get all DocTypes belonging to specific app(s)
+
+	Args:
+		app_names: String (single app) or JSON array of app names
+	"""
+	if not app_names:
 		return get_all_doctypes()
 
-	# Get the app's module list
-	try:
-		app_modules = frappe.get_module_list(app_name)
-	except:
-		# If we can't get modules for the app, return empty list
+	# Parse app_names if it's a JSON string
+	if isinstance(app_names, str):
+		try:
+			app_names = json.loads(app_names)
+		except:
+			# If it's not JSON, treat it as a single app name
+			app_names = [app_names]
+
+	# Ensure it's a list
+	if not isinstance(app_names, list):
+		app_names = [app_names]
+
+	# Get modules for all selected apps
+	all_modules = []
+	for app_name in app_names:
+		try:
+			app_modules = frappe.get_module_list(app_name)
+			all_modules.extend(app_modules)
+		except:
+			# If we can't get modules for the app, skip it
+			continue
+
+	# Remove duplicates
+	all_modules = list(set(all_modules))
+
+	if not all_modules:
 		return []
 
 	doctypes = frappe.db.sql("""
@@ -76,7 +101,7 @@ def get_doctypes_by_app(app_name):
 			AND name NOT LIKE 'DocType%%'
 			AND module IN %(modules)s
 		ORDER BY module, name
-	""", {"modules": app_modules}, as_dict=True)
+	""", {"modules": all_modules}, as_dict=True)
 
 	return doctypes
 
