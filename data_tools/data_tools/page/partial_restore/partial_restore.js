@@ -26,8 +26,11 @@ class PartialRestorePage {
 					</div>
 					<div class="frappe-card-body">
 						<div class="form-group">
-							<label>Select Backup File (.zip)</label>
+							<label>Select Backup File (.zip or .sql)</label>
 							<div id="file-upload"></div>
+							<p class="help-box small text-muted">
+								Upload a backup file in ZIP format (JSON metadata) or SQL format (database dump)
+							</p>
 						</div>
 					</div>
 				</div>
@@ -127,9 +130,14 @@ class PartialRestorePage {
 	show_preview() {
 		const backup_info = this.backup_data.backup_info;
 		const doctypes = this.backup_data.doctypes;
+		const file_type = this.backup_data.file_type || 'json';
 
-		// Show backup info
+		// Show backup info with file type indicator
 		const info_html = `
+			<div class="alert alert-info" style="margin-bottom: 15px;">
+				<strong>File Type:</strong> ${file_type.toUpperCase()}
+				${file_type === 'sql' ? '(Database Dump)' : '(JSON Metadata)'}
+			</div>
 			<div class="row">
 				<div class="col-md-6">
 					<p><strong>Created By:</strong> ${backup_info.created_by || 'Unknown'}</p>
@@ -220,7 +228,7 @@ class PartialRestorePage {
 							frappe.msgprint(__('Error restoring backup: ' + (r.message.error || 'Unknown error')));
 						}
 					},
-					error: (r) => {
+					error: () => {
 						status_elem.html('<span class="text-danger">Restore failed</span>');
 						frappe.msgprint(__('Error restoring backup. Please check the error log.'));
 					}
