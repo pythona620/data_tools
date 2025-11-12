@@ -18,11 +18,24 @@ class PartialBackupPage {
 	}
 
 	make_page() {
+		// Add "Manage Schedules" button to page header
+		this.page.add_inner_button('Manage Backup Schedules', () => {
+			frappe.set_route('List', 'Backup Schedule');
+		});
+
+		// Add "CLI Help" button
+		this.page.add_inner_button('CLI Backup Commands', () => {
+			this.show_cli_help();
+		});
+
 		this.page.main.html(`
 			<div class="partial-backup-container">
 				<div class="frappe-card">
 					<div class="frappe-card-head">
 						<h4>Select DocTypes for Backup</h4>
+						<p class="text-muted small" style="margin: 5px 0 0 0;">
+							Create an immediate backup or <a href="#List/Backup Schedule">configure scheduled backups</a>
+						</p>
 					</div>
 					<div class="frappe-card-body">
 						<div class="row">
@@ -397,6 +410,41 @@ class PartialBackupPage {
 			return;
 		}
 
+		// Ask user: Backup Now or Schedule
+		const choice_dialog = new frappe.ui.Dialog({
+			title: __('Backup Options'),
+			fields: [
+				{
+					fieldtype: 'HTML',
+					options: `<p class="text-muted">${__('You have selected')} <strong>${this.selected_doctypes.length}</strong> ${__('DocType(s)')}</p>`
+				},
+				{
+					fieldname: 'backup_type',
+					fieldtype: 'Select',
+					label: __('Choose Backup Type'),
+					options: [
+						{label: __('Backup Now (Immediate)'), value: 'now'},
+						{label: __('Schedule Backup'), value: 'schedule'}
+					],
+					default: 'now',
+					reqd: 1
+				}
+			],
+			primary_action_label: __('Continue'),
+			primary_action: (values) => {
+				choice_dialog.hide();
+				if (values.backup_type === 'now') {
+					this.execute_immediate_backup();
+				} else {
+					this.show_schedule_dialog();
+				}
+			}
+		});
+
+		choice_dialog.show();
+	}
+
+	execute_immediate_backup() {
 		const status_elem = this.page.main.find('#backup-status');
 		status_elem.html('<span class="text-primary">Creating backup...</span>');
 
@@ -451,5 +499,348 @@ class PartialBackupPage {
 				frappe.msgprint(__('Error creating backup. Please check the error log.'));
 			}
 		});
+	}
+
+	show_schedule_dialog() {
+		// Create schedule dialog
+		const schedule_dialog = new frappe.ui.Dialog({
+			title: __('Create Backup Schedule'),
+			size: 'large',
+			fields: [
+				{
+					fieldname: 'schedule_name',
+					fieldtype: 'Data',
+					label: __('Schedule Name'),
+					reqd: 1,
+					description: __('Give this schedule a unique name')
+				},
+				{
+					fieldname: 'enabled',
+					fieldtype: 'Check',
+					label: __('Enabled'),
+					default: 1
+				},
+				{
+					fieldtype: 'Column Break'
+				},
+				{
+					fieldname: 'export_format',
+					fieldtype: 'Select',
+					label: __('Export Format'),
+					options: 'json\nsql',
+					default: this.export_format || 'json',
+					reqd: 1
+				},
+				{
+					fieldtype: 'Section Break',
+					label: __('Schedule Configuration')
+				},
+				{
+					fieldname: 'frequency',
+					fieldtype: 'Select',
+					label: __('Frequency'),
+					options: 'Daily\nWeekly\nMonthly\nSpecific Date',
+					default: 'Daily',
+					reqd: 1,
+					onchange: function() {
+						const freq = this.get_value();
+						const dialog = schedule_dialog;
+
+						// Show/hide fields based on frequency
+						if (dialog.fields_dict.day_of_week) {
+							dialog.fields_dict.day_of_week.df.hidden = (freq !== 'Weekly');
+							dialog.fields_dict.day_of_week.refresh();
+						}
+
+						if (dialog.fields_dict.day_of_month) {
+							dialog.fields_dict.day_of_month.df.hidden = (freq !== 'Monthly');
+							dialog.fields_dict.day_of_month.refresh();
+						}
+
+						if (dialog.fields_dict.specific_date) {
+							dialog.fields_dict.specific_date.df.hidden = (freq !== 'Specific Date');
+							dialog.fields_dict.specific_date.refresh();
+						}
+					}
+				},
+				{
+					fieldname: 'time_of_day',
+					fieldtype: 'Time',
+					label: __('Time'),
+					default: '02:00:00',
+					reqd: 1
+				},
+				{
+					fieldtype: 'Column Break'
+				},
+				{
+					fieldname: 'day_of_week',
+					fieldtype: 'Select',
+					label: __('Day of Week'),
+					options: 'Monday\nTuesday\nWednesday\nThursday\nFriday\nSaturday\nSunday',
+					default: 'Monday',
+					hidden: 1
+				},
+				{
+					fieldname: 'day_of_month',
+					fieldtype: 'Int',
+					label: __('Day of Month'),
+					description: __('Enter day number (1-31)'),
+					default: 1,
+					hidden: 1
+				},
+				{
+					fieldname: 'specific_date',
+					fieldtype: 'Date',
+					label: __('Specific Date'),
+					hidden: 1
+				},
+				{
+					fieldtype: 'Section Break',
+					label: __('Selected DocTypes')
+				},
+				{
+					fieldname: 'doctypes_info',
+					fieldtype: 'HTML',
+					options: `<div class="text-muted">
+						<p>${__('The following DocTypes will be included in this schedule:')}</p>
+						<ul>
+							${this.selected_doctypes.map(dt => `<li>${dt}</li>`).join('')}
+						</ul>
+						<p><strong>${__('Total:')} ${this.selected_doctypes.length} ${__('DocType(s)')}</strong></p>
+					</div>`
+				}
+			],
+			primary_action_label: __('Create Schedule'),
+			primary_action: (values) => {
+				this.create_schedule(values);
+				schedule_dialog.hide();
+			}
+		});
+
+		schedule_dialog.show();
+	}
+
+	create_schedule(values) {
+		const status_elem = this.page.main.find('#backup-status');
+		status_elem.html('<span class="text-primary">Creating schedule...</span>');
+
+		// Prepare doctypes_to_backup child table data
+		const doctypes_to_backup = this.selected_doctypes.map(dt => {
+			return {
+				doctype_name: dt
+			};
+		});
+
+		// Validate frequency-specific fields
+		if (values.frequency === 'Weekly' && !values.day_of_week) {
+			frappe.msgprint(__('Please select a day of week for weekly schedules'));
+			status_elem.html('');
+			return;
+		}
+
+		if (values.frequency === 'Monthly' && !values.day_of_month) {
+			frappe.msgprint(__('Please enter a day of month for monthly schedules'));
+			status_elem.html('');
+			return;
+		}
+
+		if (values.frequency === 'Specific Date' && !values.specific_date) {
+			frappe.msgprint(__('Please select a specific date'));
+			status_elem.html('');
+			return;
+		}
+
+		// Create the Backup Schedule document
+		frappe.call({
+			method: 'frappe.client.insert',
+			args: {
+				doc: {
+					doctype: 'Backup Schedule',
+					schedule_name: values.schedule_name,
+					enabled: values.enabled ? 1 : 0,
+					frequency: values.frequency,
+					time_of_day: values.time_of_day,
+					day_of_week: values.frequency === 'Weekly' ? values.day_of_week : null,
+					day_of_month: values.frequency === 'Monthly' ? values.day_of_month : null,
+					specific_date: values.frequency === 'Specific Date' ? values.specific_date : null,
+					export_format: values.export_format,
+					doctypes_to_backup: doctypes_to_backup
+				}
+			},
+			freeze: true,
+			freeze_message: __('Creating backup schedule...'),
+			callback: (r) => {
+				if (r.message) {
+					status_elem.html(
+						`<span class="text-success">
+							<span class="fa fa-check"></span>
+							Schedule created successfully!
+						</span>`
+					);
+
+					frappe.show_alert({
+						message: __('Backup schedule created successfully'),
+						indicator: 'green'
+					});
+
+					// Ask if user wants to view the schedule
+					frappe.confirm(
+						__('Backup schedule "{0}" has been created. Do you want to view it?', [values.schedule_name]),
+						() => {
+							frappe.set_route('Form', 'Backup Schedule', r.message.name);
+						}
+					);
+				}
+			},
+			error: (r) => {
+				status_elem.html('<span class="text-danger">Schedule creation failed</span>');
+
+				// Show detailed error if available
+				let error_msg = __('Error creating schedule.');
+				if (r && r.message) {
+					error_msg += '<br><br>' + r.message;
+				} else if (r && r.exc) {
+					error_msg += '<br><br>' + __('Please check the error log for details.');
+				}
+
+				frappe.msgprint({
+					title: __('Error'),
+					indicator: 'red',
+					message: error_msg
+				});
+			}
+		});
+	}
+
+	show_cli_help() {
+		const help_dialog = new frappe.ui.Dialog({
+			title: __('CLI Backup & Restore Commands'),
+			size: 'extra-large',
+			fields: [
+				{
+					fieldtype: 'HTML',
+					options: `
+						<div style="padding: 15px;">
+							<h4><i class="fa fa-terminal"></i> For Large Backups (CLI Recommended)</h4>
+							<p class="text-muted">When dealing with large datasets that cause timeout errors, use these CLI commands directly on the server.</p>
+
+							<hr>
+
+							<h5>1. Full Database Backup (MySQL Dump)</h5>
+							<p>Backup entire site database to SQL file:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Navigate to bench directory
+cd /path/to/frappe-bench
+
+# Full site backup (includes database, files, and private files)
+bench --site [site-name] backup
+
+# Database only backup
+bench --site [site-name] backup --only-database
+
+# Backup with specific path
+bench --site [site-name] backup --backup-path /path/to/backup/folder
+</code></pre>
+
+							<h5>2. Partial Backup Using MySQL Commands</h5>
+							<p>Export specific tables (DocTypes) directly:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Get database credentials from site_config.json
+cat sites/[site-name]/site_config.json
+
+# Export specific tables (replace TABLE_NAME with actual table, e.g., tabCustomer)
+mysqldump -u [db_user] -p[db_password] [db_name] tabDocTypeName1 tabDocTypeName2 > partial_backup.sql
+
+# Example: Backup Customer and Sales Order tables
+mysqldump -u root -p mydb tabCustomer "tabSales Order" > customer_orders_backup.sql
+
+# Backup multiple tables with pattern
+mysqldump -u root -p mydb --tables \`mysql -u root -p -Nse "SHOW TABLES LIKE 'tabCustom%'"\` > custom_doctypes.sql
+</code></pre>
+
+							<h5>3. Restore from SQL Backup</h5>
+							<p>Restore a SQL backup file:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Using bench restore
+bench --site [site-name] restore /path/to/backup.sql
+
+# Using MySQL directly
+mysql -u [db_user] -p[db_password] [db_name] < backup.sql
+
+# For large files, use pv to monitor progress
+pv backup.sql | mysql -u [db_user] -p[db_password] [db_name]
+</code></pre>
+
+							<h5>4. Increase Nginx Timeout (For Web-based Large Operations)</h5>
+							<p>If you still want to use the web interface for large operations:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Edit nginx configuration
+sudo nano /etc/nginx/nginx.conf
+
+# Add these lines in http block:
+client_max_body_size 500M;
+proxy_read_timeout 300s;
+proxy_connect_timeout 300s;
+proxy_send_timeout 300s;
+send_timeout 300s;
+
+# Restart nginx
+sudo systemctl restart nginx
+sudo systemctl restart supervisor
+</code></pre>
+
+							<h5>5. Compressed Backups</h5>
+							<p>Create compressed backups to save space:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Backup and compress
+bench --site [site-name] backup --compress
+
+# Manual MySQL backup with compression
+mysqldump -u [db_user] -p[db_password] [db_name] | gzip > backup.sql.gz
+
+# Restore from compressed backup
+gunzip < backup.sql.gz | mysql -u [db_user] -p[db_password] [db_name]
+</code></pre>
+
+							<h5>6. Find Backup Files</h5>
+							<p>Locate existing backups:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># List all backups for a site
+ls -lh sites/[site-name]/private/backups/
+
+# Find recent backups
+find sites/[site-name]/private/backups/ -name "*.sql.gz" -mtime -7
+
+# Find backups created by partial backup tool
+find sites/[site-name]/private/files/ -name "partial_backup_*.sql"
+find sites/[site-name]/private/files/ -name "partial_backup_*.zip"
+</code></pre>
+
+							<hr>
+
+							<div class="alert alert-info">
+								<strong><i class="fa fa-info-circle"></i> Pro Tips:</strong>
+								<ul>
+									<li>Always test restore on a separate site before production restore</li>
+									<li>Use <code>--verbose</code> flag with bench commands for detailed output</li>
+									<li>Schedule automated backups using cron jobs</li>
+									<li>Store backups on a different server for disaster recovery</li>
+									<li>For very large databases (>10GB), consider incremental backups</li>
+								</ul>
+							</div>
+
+							<div class="alert alert-warning">
+								<strong><i class="fa fa-exclamation-triangle"></i> Important Notes:</strong>
+								<ul>
+									<li>Replace [site-name] with your actual site name</li>
+									<li>Replace [db_user], [db_password], [db_name] with actual values from site_config.json</li>
+									<li>Table names in Frappe have prefix "tab" (e.g., "tabCustomer" for Customer DocType)</li>
+									<li>Child table names use space in quotes (e.g., "tabSales Order Item")</li>
+									<li>Always backup before attempting restore operations</li>
+								</ul>
+							</div>
+						</div>
+					`
+				}
+			],
+			primary_action_label: __('Close')
+		});
+
+		help_dialog.show();
 	}
 }
