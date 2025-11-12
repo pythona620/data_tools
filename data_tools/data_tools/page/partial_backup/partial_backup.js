@@ -136,24 +136,123 @@ class PartialBackupPage {
 	setup_app_filter(apps) {
 		const container = this.page.main.find('#app-filter');
 
+		// Create a wrapper div for better control
+		const wrapper = $('<div class="multiselect-wrapper"></div>');
+		container.append(wrapper);
+
+		// Use Frappe's MultiSelectList for better handling
 		this.app_filter = frappe.ui.form.make_control({
-			parent: container,
+			parent: wrapper,
 			df: {
-				fieldtype: 'MultiSelect',
+				fieldtype: 'MultiSelectList',
 				fieldname: 'app',
-				options: apps.map(app => ({label: app, value: app})),
-				placeholder: 'Select Apps (All if empty)',
+				options: apps,
+				placeholder: 'Select Apps (Leave empty for all)',
 				onchange: () => {
-					const selected_apps = this.app_filter.get_value();
-					// If no apps selected, pass null to load all
-					const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
-					const module = this.module_filter ? this.module_filter.get_value() : null;
-					const module_filter = module === 'All Modules' ? null : module;
-					this.load_doctypes(app_filter, module_filter);
+					this.handle_app_filter_change();
 				}
 			},
 			render_input: true
 		});
+
+		// If MultiSelectList doesn't work, fallback to manual implementation
+		if (!this.app_filter || !this.app_filter.$wrapper) {
+			wrapper.empty();
+			this.create_manual_multiselect(wrapper, apps);
+		}
+	}
+
+	create_manual_multiselect(container, apps) {
+		// Manual multi-select implementation using checkboxes
+		this.selected_apps = [];
+
+		const html = `
+			<div class="app-multiselect">
+				<div class="form-control multiselect-input" style="height: auto; min-height: 38px; cursor: pointer;" id="app-multiselect-trigger">
+					<span class="text-muted">Select Apps (click to open)</span>
+				</div>
+				<div class="multiselect-dropdown" id="app-multiselect-dropdown" style="display: none; position: absolute; z-index: 1000; background: white; border: 1px solid #d1d8dd; border-radius: 4px; max-height: 300px; overflow-y: auto; width: 100%; margin-top: 2px;">
+					${apps.map(app => `
+						<div class="checkbox" style="padding: 5px 10px; margin: 0;">
+							<label style="font-weight: normal; margin: 0;">
+								<input type="checkbox" class="app-checkbox" value="${app}">
+								${app}
+							</label>
+						</div>
+					`).join('')}
+				</div>
+			</div>
+		`;
+
+		container.html(html);
+
+		// Handle dropdown toggle
+		container.find('#app-multiselect-trigger').on('click', () => {
+			container.find('#app-multiselect-dropdown').toggle();
+		});
+
+		// Handle checkbox changes
+		container.find('.app-checkbox').on('change', (e) => {
+			const checkbox = $(e.target);
+			const app = checkbox.val();
+
+			if (checkbox.is(':checked')) {
+				if (!this.selected_apps.includes(app)) {
+					this.selected_apps.push(app);
+				}
+			} else {
+				this.selected_apps = this.selected_apps.filter(a => a !== app);
+			}
+
+			this.update_multiselect_display(container);
+			this.handle_app_filter_change();
+		});
+
+		// Close dropdown when clicking outside
+		$(document).on('click', (e) => {
+			if (!$(e.target).closest('.app-multiselect').length) {
+				container.find('#app-multiselect-dropdown').hide();
+			}
+		});
+	}
+
+	update_multiselect_display(container) {
+		const trigger = container.find('#app-multiselect-trigger');
+		if (this.selected_apps.length === 0) {
+			trigger.html('<span class="text-muted">Select Apps (click to open)</span>');
+		} else {
+			const pills = this.selected_apps.map(app =>
+				`<span class="badge" style="margin: 2px; background-color: #2490ef; color: white;">${app}</span>`
+			).join('');
+			trigger.html(pills);
+		}
+	}
+
+	handle_app_filter_change() {
+		let selected_apps;
+
+		// Check if using Frappe control or manual implementation
+		if (this.app_filter && typeof this.app_filter.get_value === 'function') {
+			selected_apps = this.app_filter.get_value();
+
+			// Handle different return formats from Frappe control
+			if (typeof selected_apps === 'string') {
+				selected_apps = selected_apps ? selected_apps.split(',').map(s => s.trim()).filter(s => s) : [];
+			} else if (!Array.isArray(selected_apps)) {
+				selected_apps = [];
+			}
+		} else {
+			// Use manual selection
+			selected_apps = this.selected_apps || [];
+		}
+
+		console.log('Selected apps:', selected_apps);
+
+		// If no apps selected, pass null to load all
+		const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
+		const module = this.module_filter ? this.module_filter.get_value() : null;
+		const module_filter = module === 'All Modules' ? null : module;
+		this.load_doctypes(app_filter, module_filter);
 	}
 
 	setup_module_filter(modules) {
@@ -169,7 +268,22 @@ class PartialBackupPage {
 				onchange: () => {
 					const selected_module = this.module_filter.get_value();
 					const module = selected_module === 'All Modules' ? null : selected_module;
-					const selected_apps = this.app_filter ? this.app_filter.get_value() : null;
+
+					let selected_apps;
+					// Check if using Frappe control or manual implementation
+					if (this.app_filter && typeof this.app_filter.get_value === 'function') {
+						selected_apps = this.app_filter.get_value();
+						// Handle different return formats
+						if (typeof selected_apps === 'string') {
+							selected_apps = selected_apps ? selected_apps.split(',').map(s => s.trim()).filter(s => s) : [];
+						} else if (!Array.isArray(selected_apps)) {
+							selected_apps = [];
+						}
+					} else {
+						// Use manual selection
+						selected_apps = this.selected_apps || [];
+					}
+
 					// If no apps selected or empty array, pass null to load all
 					const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
 					this.load_doctypes(app_filter, module);
