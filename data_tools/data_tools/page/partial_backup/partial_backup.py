@@ -64,8 +64,13 @@ def get_doctypes_by_app(app_names):
 	# Parse app_names if it's a JSON string
 	if isinstance(app_names, str):
 		try:
-			app_names = json.loads(app_names)
-		except:
+			# Try to parse as JSON first
+			parsed = json.loads(app_names)
+			if isinstance(parsed, list):
+				app_names = parsed
+			else:
+				app_names = [str(parsed)]
+		except (json.JSONDecodeError, ValueError):
 			# If it's not JSON, treat it as a single app name
 			app_names = [app_names]
 
@@ -73,20 +78,28 @@ def get_doctypes_by_app(app_names):
 	if not isinstance(app_names, list):
 		app_names = [app_names]
 
+	# Log for debugging
+	frappe.log_error(f"Getting DocTypes for apps: {app_names}", "get_doctypes_by_app")
+
 	# Get modules for all selected apps
 	all_modules = []
 	for app_name in app_names:
 		try:
 			app_modules = frappe.get_module_list(app_name)
+			frappe.log_error(f"App '{app_name}' has modules: {app_modules}", "get_doctypes_by_app")
 			all_modules.extend(app_modules)
-		except:
+		except Exception as e:
 			# If we can't get modules for the app, skip it
+			frappe.log_error(f"Error getting modules for app '{app_name}': {str(e)}", "get_doctypes_by_app")
 			continue
 
 	# Remove duplicates
 	all_modules = list(set(all_modules))
 
+	frappe.log_error(f"Total unique modules: {len(all_modules)} - {all_modules}", "get_doctypes_by_app")
+
 	if not all_modules:
+		frappe.log_error("No modules found for selected apps", "get_doctypes_by_app")
 		return []
 
 	doctypes = frappe.db.sql("""
@@ -102,6 +115,8 @@ def get_doctypes_by_app(app_names):
 			AND module IN %(modules)s
 		ORDER BY module, name
 	""", {"modules": all_modules}, as_dict=True)
+
+	frappe.log_error(f"Found {len(doctypes)} DocTypes", "get_doctypes_by_app")
 
 	return doctypes
 
