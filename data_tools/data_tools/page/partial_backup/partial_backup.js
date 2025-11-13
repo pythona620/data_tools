@@ -14,6 +14,8 @@ class PartialBackupPage {
 		this.doctypes = [];
 		this.selected_doctypes = [];
 		this.export_format = 'json'; // Default format
+		this.include_files = false; // Include file attachments
+		this.job_id = null; // Track background job
 		this.make_page();
 	}
 
@@ -69,6 +71,13 @@ class PartialBackupPage {
 						<div class="form-group">
 							<label>Export Format</label>
 							<div id="export-format"></div>
+						</div>
+						<div class="form-group">
+							<label>
+								<input type="checkbox" id="include-files-checkbox" style="margin-right: 8px;">
+								Include File Attachments
+							</label>
+							<p class="help-box small text-muted">Export all file attachments associated with the selected DocTypes</p>
 						</div>
 						<div class="form-group">
 							<button class="btn btn-primary btn-sm" id="create-backup-btn">
@@ -402,6 +411,10 @@ class PartialBackupPage {
 		this.page.main.find('#doctype-search').on('input', () => {
 			this.setup_doctype_list();
 		});
+
+		this.page.main.find('#include-files-checkbox').on('change', (e) => {
+			this.include_files = e.target.checked;
+		});
 	}
 
 	create_backup() {
@@ -446,16 +459,108 @@ class PartialBackupPage {
 
 	execute_immediate_backup() {
 		const status_elem = this.page.main.find('#backup-status');
-		status_elem.html('<span class="text-primary">Creating backup...</span>');
+		status_elem.html('<span class="text-primary"><span class="fa fa-spinner fa-spin"></span> Starting backup job...</span>');
 
+		// Start background job
 		frappe.call({
-			method: 'data_tools.data_tools.page.partial_backup.partial_backup.create_partial_backup',
+			method: 'data_tools.data_tools.page.partial_backup.partial_backup.start_backup_job',
 			args: {
 				doctypes: this.selected_doctypes,
-				export_format: this.export_format
+				export_format: this.export_format,
+				include_files: this.include_files
 			},
-			freeze: true,
-			freeze_message: __('Creating backup...'),
+			callback: (r) => {
+				if (r.message && r.message.job_id) {
+					this.job_id = r.message.job_id;
+					status_elem.html(
+						`<span class="text-primary">
+							<span class="fa fa-spinner fa-spin"></span>
+							Backup in progress... Please wait.
+						</span>`
+					);
+
+					// Start polling for job status
+					this.poll_job_status();
+				} else {
+					status_elem.html('<span class="text-danger">Failed to start backup job</span>');
+				}
+			},
+			error: () => {
+				status_elem.html('<span class="text-danger">Error starting backup job</span>');
+				frappe.msgprint(__('Error starting backup. Please check the error log.'));
+			}
+		});
+	}
+
+	poll_job_status() {
+		const status_elem = this.page.main.find('#backup-status');
+
+		const check_status = () => {
+			frappe.call({
+				method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_job_status',
+				args: {
+					job_id: this.job_id
+				},
+				callback: (r) => {
+					if (r.message) {
+						const status = r.message.status;
+						const progress = r.message.progress;
+
+						if (status === 'completed') {
+							// Job completed - download the file
+							status_elem.html(
+								`<span class="text-success">
+									<span class="fa fa-check"></span>
+									Backup completed! Downloading...
+								</span>`
+							);
+							this.download_backup(this.job_id);
+						} else if (status === 'failed') {
+							status_elem.html(
+								`<span class="text-danger">
+									<span class="fa fa-times"></span>
+									Backup failed: ${r.message.error || 'Unknown error'}
+								</span>`
+							);
+							frappe.msgprint(__('Backup failed. Please check the error log.'));
+						} else if (status === 'running' || status === 'queued') {
+							// Update progress message
+							let progress_msg = 'Backup in progress...';
+							if (progress) {
+								progress_msg = progress;
+							}
+							status_elem.html(
+								`<span class="text-primary">
+									<span class="fa fa-spinner fa-spin"></span>
+									${progress_msg}
+								</span>`
+							);
+							// Continue polling
+							setTimeout(check_status, 2000);
+						} else {
+							// Unknown status, keep polling
+							setTimeout(check_status, 2000);
+						}
+					}
+				},
+				error: () => {
+					status_elem.html('<span class="text-danger">Error checking job status</span>');
+				}
+			});
+		};
+
+		// Start checking status
+		check_status();
+	}
+
+	download_backup(job_id) {
+		const status_elem = this.page.main.find('#backup-status');
+
+		frappe.call({
+			method: 'data_tools.data_tools.page.partial_backup.partial_backup.download_backup',
+			args: {
+				job_id: job_id
+			},
 			callback: (r) => {
 				if (r.message && r.message.success) {
 					const result = r.message;
@@ -484,7 +589,8 @@ class PartialBackupPage {
 					status_elem.html(
 						`<span class="text-success">
 							<span class="fa fa-check"></span>
-							Backup created: ${result.total_doctypes} DocTypes, ${result.total_records} records
+							Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
+							${result.total_files ? `, ${result.total_files} files` : ''}
 						</span>`
 					);
 
@@ -492,11 +598,12 @@ class PartialBackupPage {
 						message: __('Backup downloaded successfully'),
 						indicator: 'green'
 					});
+				} else {
+					status_elem.html('<span class="text-danger">Failed to download backup</span>');
 				}
 			},
 			error: () => {
-				status_elem.html('<span class="text-danger">Backup failed</span>');
-				frappe.msgprint(__('Error creating backup. Please check the error log.'));
+				status_elem.html('<span class="text-danger">Error downloading backup</span>');
 			}
 		});
 	}
