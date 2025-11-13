@@ -10,6 +10,10 @@ from frappe.model.document import get_controller
 import zipfile
 from io import BytesIO
 import base64
+import uuid
+from frappe.utils.background_jobs import enqueue
+import shutil
+from pathlib import Path
 
 
 @frappe.whitelist()
@@ -122,12 +126,13 @@ def get_doctypes_by_app(app_names):
 
 
 @frappe.whitelist()
-def create_partial_backup(doctypes, export_format='json'):
+def create_partial_backup(doctypes, export_format='json', include_files=False):
 	"""Create a partial backup of selected DocTypes
 
 	Args:
 		doctypes: List of DocType names to backup
 		export_format: 'json' or 'sql' (default: 'json')
+		include_files: Boolean to include file attachments (default: False)
 	"""
 	if isinstance(doctypes, str):
 		doctypes = json.loads(doctypes)
@@ -135,28 +140,229 @@ def create_partial_backup(doctypes, export_format='json'):
 	if not doctypes or not isinstance(doctypes, list) or len(doctypes) == 0:
 		frappe.throw(_("Please select at least one DocType"))
 
+	# Convert include_files to boolean
+	if isinstance(include_files, str):
+		include_files = include_files.lower() in ['true', '1', 'yes']
+
 	if export_format == 'sql':
-		return create_sql_backup(doctypes)
+		return create_sql_backup(doctypes, include_files)
 	else:
-		return create_json_backup(doctypes)
+		return create_json_backup(doctypes, include_files)
 
 
-def create_json_backup(doctypes):
-	"""Create JSON backup of selected DocTypes"""
+@frappe.whitelist()
+def start_backup_job(doctypes, export_format='json', include_files=False):
+	"""Start a background job for backup creation
+
+	Args:
+		doctypes: List of DocType names to backup
+		export_format: 'json' or 'sql' (default: 'json')
+		include_files: Boolean to include file attachments (default: False)
+
+	Returns:
+		dict: Contains job_id for tracking
+	"""
+	if isinstance(doctypes, str):
+		doctypes = json.loads(doctypes)
+
+	if not doctypes or not isinstance(doctypes, list) or len(doctypes) == 0:
+		frappe.throw(_("Please select at least one DocType"))
+
+	# Convert include_files to boolean
+	if isinstance(include_files, str):
+		include_files = include_files.lower() in ['true', '1', 'yes']
+
+	# Generate unique job ID
+	job_id = str(uuid.uuid4())
+
+	# Store job metadata in cache
+	job_data = {
+		'status': 'queued',
+		'progress': 'Starting backup...',
+		'doctypes': doctypes,
+		'export_format': export_format,
+		'include_files': include_files,
+		'created_by': frappe.session.user,
+		'created_at': frappe.utils.now()
+	}
+	frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=7200)
+
+	# Enqueue the backup job
+	enqueue(
+		method=execute_backup_job,
+		queue='long',
+		timeout=3600,
+		backup_job_id=job_id,
+		doctypes=doctypes,
+		export_format=export_format,
+		include_files=include_files
+	)
+
+	return {
+		'job_id': job_id,
+		'status': 'queued'
+	}
+
+
+def execute_backup_job(backup_job_id, doctypes, export_format='json', include_files=False):
+	"""Execute the backup job in background
+
+	Args:
+		backup_job_id: Unique job identifier
+		doctypes: List of DocType names to backup
+		export_format: 'json' or 'sql'
+		include_files: Boolean to include file attachments
+	"""
+	try:
+		# Update job status to running
+		job_data = json.loads(frappe.cache().get_value(f'backup_job_{backup_job_id}') or '{}')
+		job_data['status'] = 'running'
+		job_data['progress'] = 'Backup in progress...'
+		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+
+		# Create backup
+		if export_format == 'sql':
+			result = create_sql_backup(doctypes, include_files, backup_job_id)
+		else:
+			result = create_json_backup(doctypes, include_files, backup_job_id)
+
+		# Save backup file to temp location
+		backup_dir = frappe.get_site_path('private', 'files', 'partial_backups')
+		os.makedirs(backup_dir, exist_ok=True)
+
+		file_path = os.path.join(backup_dir, f"{backup_job_id}_{result['filename']}")
+
+		# Decode and save file
+		file_content = base64.b64decode(result['file_data'])
+		with open(file_path, 'wb') as f:
+			f.write(file_content)
+
+		# Update job status to completed
+		job_data['status'] = 'completed'
+		job_data['progress'] = 'Backup completed successfully'
+		job_data['file_path'] = file_path
+		job_data['filename'] = result['filename']
+		job_data['total_doctypes'] = result['total_doctypes']
+		job_data['total_records'] = result['total_records']
+		job_data['total_files'] = result.get('total_files', 0)
+		job_data['completed_at'] = frappe.utils.now()
+		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+
+	except Exception as e:
+		# Update job status to failed
+		frappe.log_error(f"Backup job {backup_job_id} failed: {str(e)}", "Backup Job Error")
+		job_data = json.loads(frappe.cache().get_value(f'backup_job_{backup_job_id}') or '{}')
+		job_data['status'] = 'failed'
+		job_data['error'] = str(e)
+		job_data['failed_at'] = frappe.utils.now()
+		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+
+
+@frappe.whitelist()
+def get_job_status(job_id):
+	"""Get the status of a backup job
+
+	Args:
+		job_id: Unique job identifier
+
+	Returns:
+		dict: Job status information
+	"""
+	job_data = frappe.cache().get_value(f'backup_job_{job_id}')
+
+	if not job_data:
+		return {
+			'status': 'not_found',
+			'error': 'Job not found or expired'
+		}
+
+	job_info = json.loads(job_data)
+
+	return {
+		'status': job_info.get('status'),
+		'progress': job_info.get('progress'),
+		'error': job_info.get('error'),
+		'total_doctypes': job_info.get('total_doctypes'),
+		'total_records': job_info.get('total_records'),
+		'total_files': job_info.get('total_files', 0)
+	}
+
+
+@frappe.whitelist()
+def download_backup(job_id):
+	"""Download a completed backup file
+
+	Args:
+		job_id: Unique job identifier
+
+	Returns:
+		dict: File data for download
+	"""
+	job_data = frappe.cache().get_value(f'backup_job_{job_id}')
+
+	if not job_data:
+		frappe.throw(_("Job not found or expired"))
+
+	job_info = json.loads(job_data)
+
+	if job_info.get('status') != 'completed':
+		frappe.throw(_("Backup is not completed yet"))
+
+	file_path = job_info.get('file_path')
+	if not file_path or not os.path.exists(file_path):
+		frappe.throw(_("Backup file not found"))
+
+	# Read file and encode
+	with open(file_path, 'rb') as f:
+		file_content = f.read()
+
+	file_data = base64.b64encode(file_content).decode()
+
+	# Clean up the file after download
+	try:
+		os.remove(file_path)
+	except:
+		pass
+
+	return {
+		'success': True,
+		'file_data': file_data,
+		'filename': job_info.get('filename'),
+		'total_doctypes': job_info.get('total_doctypes'),
+		'total_records': job_info.get('total_records'),
+		'total_files': job_info.get('total_files', 0)
+	}
+
+
+def create_json_backup(doctypes, include_files=False, job_id=None):
+	"""Create JSON backup of selected DocTypes
+
+	Args:
+		doctypes: List of DocType names to backup
+		include_files: Boolean to include file attachments
+		job_id: Optional job ID for progress tracking
+	"""
 	backup_data = {
 		"backup_info": {
 			"created_by": frappe.session.user,
 			"creation_date": frappe.utils.now(),
 			"frappe_version": frappe.__version__,
-			"total_doctypes": len(doctypes)
+			"total_doctypes": len(doctypes),
+			"include_files": include_files
 		},
 		"doctypes": []
 	}
 
 	total_records = 0
+	total_files = 0
+	file_paths = []  # Track files to include in backup
 
-	for doctype_name in doctypes:
+	for idx, doctype_name in enumerate(doctypes):
 		try:
+			# Update progress if job_id is provided
+			if job_id:
+				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)})...")
+
 			# Get DocType definition
 			doctype_doc = frappe.get_doc("DocType", doctype_name)
 			doctype_json = doctype_doc.as_dict()
@@ -178,20 +384,33 @@ def create_json_backup(doctypes):
 					except Exception as e:
 						frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
 
+			# Collect file attachments if requested
+			doctype_files = []
+			if include_files:
+				doctype_files = get_doctype_files(doctype_name, records)
+				file_paths.extend(doctype_files)
+				total_files += len(doctype_files)
+
 			backup_data["doctypes"].append({
 				"doctype": doctype_name,
 				"definition": doctype_json,
 				"records": records,
-				"record_count": len(records)
+				"record_count": len(records),
+				"file_count": len(doctype_files) if include_files else 0
 			})
 
 			total_records += len(records)
 
 		except Exception as e:
 			frappe.log_error(f"Error backing up {doctype_name}: {str(e)}")
-			frappe.msgprint(_("Error backing up {0}: {1}").format(doctype_name, str(e)))
+			# Continue with other doctypes
 
 	backup_data["backup_info"]["total_records"] = total_records
+	backup_data["backup_info"]["total_files"] = total_files
+
+	# Update progress
+	if job_id:
+		update_job_progress(job_id, "Creating backup archive...")
 
 	# Create ZIP file
 	zip_buffer = BytesIO()
@@ -204,10 +423,27 @@ def create_json_backup(doctypes):
 		metadata = {
 			"doctypes": [dt["doctype"] for dt in backup_data["doctypes"]],
 			"total_records": total_records,
+			"total_files": total_files,
+			"include_files": include_files,
 			"created_by": frappe.session.user,
 			"creation_date": frappe.utils.now()
 		}
 		zip_file.writestr('metadata.json', json.dumps(metadata, indent=2, default=str))
+
+		# Add files to ZIP
+		if include_files and file_paths:
+			if job_id:
+				update_job_progress(job_id, f"Adding {len(file_paths)} files to backup...")
+
+			for file_info in file_paths:
+				try:
+					file_path = frappe.get_site_path() + file_info['file_path']
+					if os.path.exists(file_path):
+						# Add file with relative path in zip
+						arcname = f"files{file_info['file_path']}"
+						zip_file.write(file_path, arcname)
+				except Exception as e:
+					frappe.log_error(f"Error adding file {file_info['file_path']}: {str(e)}")
 
 	# Encode to base64 for download
 	zip_buffer.seek(0)
@@ -218,14 +454,23 @@ def create_json_backup(doctypes):
 		"file_data": file_data,
 		"filename": f"partial_backup_{frappe.utils.now_datetime().strftime('%Y%m%d_%H%M%S')}.zip",
 		"total_doctypes": len(backup_data["doctypes"]),
-		"total_records": total_records
+		"total_records": total_records,
+		"total_files": total_files
 	}
 
 
-def create_sql_backup(doctypes):
-	"""Create SQL backup of selected DocTypes"""
+def create_sql_backup(doctypes, include_files=False, job_id=None):
+	"""Create SQL backup of selected DocTypes
+
+	Args:
+		doctypes: List of DocType names to backup
+		include_files: Boolean to include file attachments
+		job_id: Optional job ID for progress tracking
+	"""
 	sql_statements = []
 	total_records = 0
+	total_files = 0
+	file_paths = []
 
 	# Add header comment
 	sql_statements.append(f"""-- Partial Backup SQL Export
@@ -233,6 +478,7 @@ def create_sql_backup(doctypes):
 -- Creation date: {frappe.utils.now()}
 -- Frappe version: {frappe.__version__}
 -- Total DocTypes: {len(doctypes)}
+-- Include Files: {include_files}
 --
 -- This file contains SQL statements to backup selected DocTypes
 -- WARNING: This will DROP and recreate tables!
@@ -242,8 +488,12 @@ SET FOREIGN_KEY_CHECKS=0;
 
 """)
 
-	for doctype_name in doctypes:
+	for idx, doctype_name in enumerate(doctypes):
 		try:
+			# Update progress if job_id is provided
+			if job_id:
+				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)})...")
+
 			# Get DocType definition
 			doctype_doc = frappe.get_doc("DocType", doctype_name)
 			table_name = f"tab{doctype_name}"
@@ -262,6 +512,7 @@ SET FOREIGN_KEY_CHECKS=0;
 
 			# Get all records
 			records_count = 0
+			records = []
 			if doctype_doc.issingle:
 				# Single DocType
 				if frappe.db.exists(doctype_name, doctype_name):
@@ -286,6 +537,12 @@ SET FOREIGN_KEY_CHECKS=0;
 					insert_sql = generate_insert_statements(table_name, records)
 					sql_statements.extend(insert_sql)
 
+			# Collect file attachments if requested
+			if include_files and records:
+				doctype_files = get_doctype_files(doctype_name, records)
+				file_paths.extend(doctype_files)
+				total_files += len(doctype_files)
+
 			total_records += records_count
 			sql_statements.append(f"-- Records exported: {records_count}\n")
 
@@ -296,20 +553,47 @@ SET FOREIGN_KEY_CHECKS=0;
 
 	sql_statements.append(f"\nSET FOREIGN_KEY_CHECKS=1;")
 	sql_statements.append(f"\n-- Total records exported: {total_records}")
+	sql_statements.append(f"-- Total files: {total_files}")
 	sql_statements.append(f"-- Backup completed: {frappe.utils.now()}\n")
 
 	# Combine all SQL statements
 	sql_content = "\n".join(sql_statements)
 
-	# Encode to base64 for download
-	file_data = base64.b64encode(sql_content.encode('utf-8')).decode()
+	# If files are included, create a ZIP with SQL + files
+	if include_files and file_paths:
+		if job_id:
+			update_job_progress(job_id, f"Creating archive with {len(file_paths)} files...")
+
+		zip_buffer = BytesIO()
+		with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+			# Add SQL file
+			zip_file.writestr('backup.sql', sql_content)
+
+			# Add files
+			for file_info in file_paths:
+				try:
+					file_path = frappe.get_site_path() + file_info['file_path']
+					if os.path.exists(file_path):
+						arcname = f"files{file_info['file_path']}"
+						zip_file.write(file_path, arcname)
+				except Exception as e:
+					frappe.log_error(f"Error adding file {file_info['file_path']}: {str(e)}")
+
+		zip_buffer.seek(0)
+		file_data = base64.b64encode(zip_buffer.getvalue()).decode()
+		filename = f"partial_backup_{frappe.utils.now_datetime().strftime('%Y%m%d_%H%M%S')}.zip"
+	else:
+		# Just SQL file
+		file_data = base64.b64encode(sql_content.encode('utf-8')).decode()
+		filename = f"partial_backup_{frappe.utils.now_datetime().strftime('%Y%m%d_%H%M%S')}.sql"
 
 	return {
 		"success": True,
 		"file_data": file_data,
-		"filename": f"partial_backup_{frappe.utils.now_datetime().strftime('%Y%m%d_%H%M%S')}.sql",
+		"filename": filename,
 		"total_doctypes": len(doctypes),
-		"total_records": total_records
+		"total_records": total_records,
+		"total_files": total_files
 	}
 
 
@@ -350,3 +634,68 @@ def generate_insert_statements(table_name, records):
 		statements.append("")
 
 	return statements
+
+
+def get_doctype_files(doctype_name, records):
+	"""Get all file attachments for a DocType's records
+
+	Args:
+		doctype_name: Name of the DocType
+		records: List of record dictionaries
+
+	Returns:
+		list: List of file info dictionaries with file_path
+	"""
+	file_list = []
+
+	if not records:
+		return file_list
+
+	# Get all record names
+	record_names = [r.get('name') for r in records if r.get('name')]
+
+	if not record_names:
+		return file_list
+
+	# Query File doctype for attachments linked to these records
+	try:
+		files = frappe.get_all(
+			'File',
+			filters={
+				'attached_to_doctype': doctype_name,
+				'attached_to_name': ['in', record_names]
+			},
+			fields=['name', 'file_url', 'file_name', 'attached_to_name']
+		)
+
+		for file_doc in files:
+			if file_doc.file_url:
+				# Convert URL to file path
+				file_url = file_doc.file_url
+				if file_url.startswith('/files/') or file_url.startswith('/private/files/'):
+					file_list.append({
+						'file_path': file_url,
+						'file_name': file_doc.file_name,
+						'attached_to': file_doc.attached_to_name
+					})
+
+	except Exception as e:
+		frappe.log_error(f"Error getting files for {doctype_name}: {str(e)}")
+
+	return file_list
+
+
+def update_job_progress(job_id, progress_message):
+	"""Update the progress message for a job
+
+	Args:
+		job_id: Unique job identifier
+		progress_message: Progress message to display
+	"""
+	try:
+		job_data = json.loads(frappe.cache().get_value(f'backup_job_{job_id}') or '{}')
+		if job_data:
+			job_data['progress'] = progress_message
+			frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=7200)
+	except Exception as e:
+		frappe.log_error(f"Error updating job progress: {str(e)}")
