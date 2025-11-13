@@ -79,27 +79,27 @@ def get_doctypes_by_app(app_names):
 		app_names = [app_names]
 
 	# Log for debugging
-	frappe.log_error(f"Getting DocTypes for apps: {app_names}", "get_doctypes_by_app")
+	frappe.log_error("get_doctypes_by_app", f"Getting DocTypes for apps: {app_names}")
 
 	# Get modules for all selected apps
 	all_modules = []
 	for app_name in app_names:
 		try:
 			app_modules = frappe.get_module_list(app_name)
-			frappe.log_error(f"App '{app_name}' has modules: {app_modules}", "get_doctypes_by_app")
+			frappe.log_error("get_doctypes_by_app", f"App '{app_name}' has modules: {app_modules}")
 			all_modules.extend(app_modules)
 		except Exception as e:
 			# If we can't get modules for the app, skip it
-			frappe.log_error(f"Error getting modules for app '{app_name}': {str(e)}", "get_doctypes_by_app")
+			frappe.log_error("get_doctypes_by_app", f"Error getting modules for app '{app_name}': {str(e)}")
 			continue
 
 	# Remove duplicates
 	all_modules = list(set(all_modules))
 
-	frappe.log_error(f"Total unique modules: {len(all_modules)} - {all_modules}", "get_doctypes_by_app")
+	frappe.log_error("get_doctypes_by_app", f"Total unique modules: {len(all_modules)} - {all_modules}")
 
 	if not all_modules:
-		frappe.log_error("No modules found for selected apps", "get_doctypes_by_app")
+		frappe.log_error("get_doctypes_by_app", "No modules found for selected apps")
 		return []
 
 	doctypes = frappe.db.sql("""
@@ -116,7 +116,7 @@ def get_doctypes_by_app(app_names):
 		ORDER BY module, name
 	""", {"modules": all_modules}, as_dict=True)
 
-	frappe.log_error(f"Found {len(doctypes)} DocTypes", "get_doctypes_by_app")
+	frappe.log_error("get_doctypes_by_app", f"Found {len(doctypes)} DocTypes")
 
 	return doctypes
 
