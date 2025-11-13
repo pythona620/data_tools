@@ -18,11 +18,19 @@ class PartialRestorePage {
 	}
 
 	make_page() {
+		// Add "CLI Help" button
+		this.page.add_inner_button('CLI Restore Commands', () => {
+			this.show_cli_help();
+		});
+
 		this.page.main.html(`
 			<div class="partial-restore-container">
 				<div class="frappe-card">
 					<div class="frappe-card-head">
 						<h4>Upload Backup File</h4>
+						<p class="text-muted small" style="margin: 5px 0 0 0;">
+							For large backups, use <a href="#" id="cli-help-link">CLI commands</a> to avoid timeout errors
+						</p>
 					</div>
 					<div class="frappe-card-body">
 						<div class="form-group">
@@ -291,5 +299,189 @@ class PartialRestorePage {
 		this.page.main.find('#preview-card').hide();
 		this.page.main.find('#log-card').hide();
 		this.file_upload.set_value('');
+	}
+
+	show_cli_help() {
+		const help_dialog = new frappe.ui.Dialog({
+			title: __('CLI Restore Commands'),
+			size: 'extra-large',
+			fields: [
+				{
+					fieldtype: 'HTML',
+					options: `
+						<div style="padding: 15px;">
+							<h4><i class="fa fa-terminal"></i> Restore Large Backups via CLI</h4>
+							<p class="text-muted">For large backups that cause nginx timeout errors, use these CLI commands on your server.</p>
+
+							<hr>
+
+							<h5>1. Restore Full Site Backup</h5>
+							<p>Restore a complete site backup created with bench backup:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Navigate to bench directory
+cd /path/to/frappe-bench
+
+# Restore database, files, and private files
+bench --site [site-name] restore /path/to/backup/[timestamp]-[site-name]-database.sql.gz
+
+# Restore with force (skip confirmation)
+bench --site [site-name] --force restore /path/to/backup.sql.gz
+
+# Restore specific components
+bench --site [site-name] restore /path/to/database.sql.gz --with-public-files /path/to/files.tar
+bench --site [site-name] restore /path/to/database.sql.gz --with-private-files /path/to/private-files.tar
+</code></pre>
+
+							<h5>2. Restore SQL Backup (Direct MySQL)</h5>
+							<p>Import SQL file directly to database:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Get database credentials
+cat sites/[site-name]/site_config.json
+
+# Restore SQL file
+mysql -u [db_user] -p[db_password] [db_name] < backup.sql
+
+# Restore compressed SQL file
+gunzip < backup.sql.gz | mysql -u [db_user] -p[db_password] [db_name]
+
+# With progress monitoring (requires pv)
+pv backup.sql | mysql -u [db_user] -p[db_password] [db_name]
+
+# Restore with verbose output
+mysql -u [db_user] -p[db_password] [db_name] -v < backup.sql
+</code></pre>
+
+							<h5>3. Restore Partial Backup (Specific Tables)</h5>
+							<p>Import only specific tables from a partial backup:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Restore partial backup SQL file
+mysql -u [db_user] -p[db_password] [db_name] < partial_backup.sql
+
+# Check which tables are in the backup
+grep "CREATE TABLE" partial_backup.sql
+
+# Extract and restore specific table only
+sed -n '/CREATE TABLE \`tabCustomer\`/,/UNLOCK TABLES/p' partial_backup.sql | mysql -u [db_user] -p[db_password] [db_name]
+</code></pre>
+
+							<h5>4. Restore with Error Handling</h5>
+							<p>Handle errors during restore:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Force restore (ignore errors)
+mysql -u [db_user] -p[db_password] [db_name] --force < backup.sql
+
+# Log errors to file
+mysql -u [db_user] -p[db_password] [db_name] < backup.sql 2> restore_errors.log
+
+# Skip foreign key checks (useful for partial restores)
+mysql -u [db_user] -p[db_password] [db_name] -e "SET FOREIGN_KEY_CHECKS=0; SOURCE backup.sql; SET FOREIGN_KEY_CHECKS=1;"
+</code></pre>
+
+							<h5>5. Post-Restore Tasks</h5>
+							<p>After restoring via CLI:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Clear cache
+bench --site [site-name] clear-cache
+
+# Rebuild search index
+bench --site [site-name] build-search-index
+
+# Migrate if needed
+bench --site [site-name] migrate
+
+# Restart services
+sudo systemctl restart supervisor
+</code></pre>
+
+							<h5>6. Increase Nginx Timeout (For Web UI)</h5>
+							<p>To use web interface for larger files, increase timeout limits:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># Edit nginx site config
+sudo nano /etc/nginx/sites-available/frappe-bench
+
+# Add these in server block:
+client_max_body_size 500M;
+proxy_read_timeout 600s;
+proxy_connect_timeout 600s;
+proxy_send_timeout 600s;
+
+# Edit common_site_config.json for Frappe
+cd /path/to/frappe-bench
+nano sites/common_site_config.json
+
+# Add:
+{
+  "http_timeout": 600,
+  "socketio_ping_timeout": 120000,
+  "socketio_ping_interval": 60000
+}
+
+# Restart services
+sudo systemctl restart nginx
+bench restart
+</code></pre>
+
+							<h5>7. Troubleshooting</h5>
+							<p>Common issues and solutions:</p>
+							<pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto;"><code># If restore hangs, check MySQL processlist
+mysql -u root -p -e "SHOW PROCESSLIST;"
+
+# Check MySQL error log
+tail -f /var/log/mysql/error.log
+
+# Check available disk space
+df -h
+
+# Monitor memory usage during restore
+watch -n 1 free -m
+
+# If out of memory, increase swap or use smaller batch sizes
+# Edit backup SQL to reduce INSERT batch sizes before restore
+</code></pre>
+
+							<hr>
+
+							<div class="alert alert-info">
+								<strong><i class="fa fa-info-circle"></i> Best Practices:</strong>
+								<ul>
+									<li>Always create a backup before restoring</li>
+									<li>Test restore on development/staging site first</li>
+									<li>Use <code>--force</code> flag with bench restore for automated scripts</li>
+									<li>Monitor disk space - ensure you have 2x backup size available</li>
+									<li>For very large databases, restore during off-peak hours</li>
+									<li>Use <code>screen</code> or <code>tmux</code> for long-running operations</li>
+								</ul>
+							</div>
+
+							<div class="alert alert-warning">
+								<strong><i class="fa fa-exclamation-triangle"></i> Important:</strong>
+								<ul>
+									<li>Replace [site-name] with actual site name</li>
+									<li>Replace [db_user], [db_password], [db_name] from site_config.json</li>
+									<li>Ensure SET FOREIGN_KEY_CHECKS=0 is used for partial restores</li>
+									<li>Always run migrations after restore: <code>bench --site [site-name] migrate</code></li>
+									<li>Restore may drop and recreate tables - existing data will be lost</li>
+								</ul>
+							</div>
+
+							<div class="alert alert-success">
+								<strong><i class="fa fa-lightbulb-o"></i> Pro Tip:</strong><br>
+								For massive databases (100GB+), consider using:
+								<ul>
+									<li><code>mydumper/myloader</code> - parallel dump and restore tool</li>
+									<li>Percona XtraBackup - hot backup without locking</li>
+									<li>Database replication for minimal downtime</li>
+								</ul>
+							</div>
+						</div>
+					`
+				}
+			],
+			primary_action_label: __('Close')
+		});
+
+		help_dialog.show();
+
+		// Add click handler for inline help link
+		setTimeout(() => {
+			this.page.main.find('#cli-help-link').on('click', (e) => {
+				e.preventDefault();
+				this.show_cli_help();
+			});
+		}, 100);
 	}
 }

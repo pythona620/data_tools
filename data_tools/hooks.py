@@ -148,23 +148,14 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"data_tools.tasks.all"
-# 	],
-# 	"daily": [
-# 		"data_tools.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"data_tools.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"data_tools.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"data_tools.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"hourly": [
+		"data_tools.tasks.process_scheduled_backups"
+	],
+	"daily": [
+		"data_tools.tasks.check_backup_schedules"
+	],
+}
 
 # Testing
 # -------
