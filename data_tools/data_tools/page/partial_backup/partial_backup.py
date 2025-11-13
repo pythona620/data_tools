@@ -14,6 +14,9 @@ import uuid
 from frappe.utils.background_jobs import enqueue
 import shutil
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @frappe.whitelist()
@@ -83,27 +86,27 @@ def get_doctypes_by_app(app_names):
 		app_names = [app_names]
 
 	# Log for debugging
-	frappe.log_error("get_doctypes_by_app", f"Getting DocTypes for apps: {app_names}")
+	logger.info(f"Getting DocTypes for apps: {app_names}")
 
 	# Get modules for all selected apps
 	all_modules = []
 	for app_name in app_names:
 		try:
 			app_modules = frappe.get_module_list(app_name)
-			frappe.log_error("get_doctypes_by_app", f"App '{app_name}' has modules: {app_modules}")
+			logger.info(f"App '{app_name}' has modules: {app_modules}")
 			all_modules.extend(app_modules)
 		except Exception as e:
 			# If we can't get modules for the app, skip it
-			frappe.log_error("get_doctypes_by_app", f"Error getting modules for app '{app_name}': {str(e)}")
+			logger.warning(f"Error getting modules for app '{app_name}': {str(e)}")
 			continue
 
 	# Remove duplicates
 	all_modules = list(set(all_modules))
 
-	frappe.log_error("get_doctypes_by_app", f"Total unique modules: {len(all_modules)} - {all_modules}")
+	logger.info(f"Total unique modules: {len(all_modules)}")
 
 	if not all_modules:
-		frappe.log_error("get_doctypes_by_app", "No modules found for selected apps")
+		logger.warning("No modules found for selected apps")
 		return []
 
 	doctypes = frappe.db.sql("""
@@ -120,7 +123,7 @@ def get_doctypes_by_app(app_names):
 		ORDER BY module, name
 	""", {"modules": all_modules}, as_dict=True)
 
-	frappe.log_error("get_doctypes_by_app", f"Found {len(doctypes)} DocTypes")
+	logger.info(f"Found {len(doctypes)} DocTypes")
 
 	return doctypes
 
@@ -214,8 +217,14 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		include_files: Boolean to include file attachments
 	"""
 	try:
-		# Update job status to running
+		# Get job data to retrieve user
 		job_data = json.loads(frappe.cache().get_value(f'backup_job_{backup_job_id}') or '{}')
+
+		# Set user context for the background job
+		if job_data.get('created_by'):
+			frappe.set_user(job_data.get('created_by'))
+
+		# Update job status to running
 		job_data['status'] = 'running'
 		job_data['progress'] = 'Backup in progress...'
 		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
@@ -237,6 +246,13 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		with open(file_path, 'wb') as f:
 			f.write(file_content)
 
+		# Verify file was created
+		if not os.path.exists(file_path):
+			raise Exception(f"Failed to create backup file at {file_path}")
+
+		file_size = os.path.getsize(file_path)
+		logger.info(f"Backup job {backup_job_id} completed. File: {file_path} ({file_size} bytes)")
+
 		# Update job status to completed
 		job_data['status'] = 'completed'
 		job_data['progress'] = 'Backup completed successfully'
@@ -246,7 +262,19 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		job_data['total_records'] = result['total_records']
 		job_data['total_files'] = result.get('total_files', 0)
 		job_data['completed_at'] = frappe.utils.now()
-		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+
+		# Save to cache
+		cache_key = f'backup_job_{backup_job_id}'
+		cache_value = json.dumps(job_data)
+		frappe.cache().set_value(cache_key, cache_value, expires_in_sec=7200)
+
+		# Verify cache was set
+		verify = frappe.cache().get_value(cache_key)
+		if not verify:
+			logger.error(f"Failed to set cache for {cache_key}")
+			frappe.log_error(f"Cache Error: {cache_key}", "Backup Cache Failed")
+
+		frappe.db.commit()
 
 	except Exception as e:
 		# Update job status to failed
@@ -256,6 +284,7 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		job_data['error'] = str(e)
 		job_data['failed_at'] = frappe.utils.now()
 		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+		frappe.db.commit()
 
 
 @frappe.whitelist()
@@ -298,40 +327,60 @@ def download_backup(job_id):
 	Returns:
 		dict: File data for download
 	"""
-	job_data = frappe.cache().get_value(f'backup_job_{job_id}')
-
-	if not job_data:
-		frappe.throw(_("Job not found or expired"))
-
-	job_info = json.loads(job_data)
-
-	if job_info.get('status') != 'completed':
-		frappe.throw(_("Backup is not completed yet"))
-
-	file_path = job_info.get('file_path')
-	if not file_path or not os.path.exists(file_path):
-		frappe.throw(_("Backup file not found"))
-
-	# Read file and encode
-	with open(file_path, 'rb') as f:
-		file_content = f.read()
-
-	file_data = base64.b64encode(file_content).decode()
-
-	# Clean up the file after download
 	try:
-		os.remove(file_path)
-	except:
-		pass
+		logger.info(f"Download request for job {job_id}")
+		job_data = frappe.cache().get_value(f'backup_job_{job_id}')
 
-	return {
-		'success': True,
-		'file_data': file_data,
-		'filename': job_info.get('filename'),
-		'total_doctypes': job_info.get('total_doctypes'),
-		'total_records': job_info.get('total_records'),
-		'total_files': job_info.get('total_files', 0)
-	}
+		if not job_data:
+			logger.error(f"Job {job_id} not found in cache")
+			frappe.throw(_("Job not found or expired"))
+
+		job_info = json.loads(job_data)
+		logger.info(f"Job {job_id} status: {job_info.get('status')}")
+
+		if job_info.get('status') != 'completed':
+			status = job_info.get('status', 'unknown')
+			logger.error(f"Job {job_id} status is {status}, not completed")
+			frappe.throw(_("Backup is not completed yet. Status: {0}").format(status))
+
+		file_path = job_info.get('file_path')
+		if not file_path:
+			logger.error(f"Job {job_id} has no file_path")
+			frappe.throw(_("Backup file path not found"))
+
+		logger.info(f"Job {job_id} file path: {file_path}")
+
+		if not os.path.exists(file_path):
+			logger.error(f"Job {job_id} file does not exist at {file_path}")
+			frappe.throw(_("Backup file not found at expected location"))
+
+		# Read file and encode
+		with open(file_path, 'rb') as f:
+			file_content = f.read()
+
+		file_data = base64.b64encode(file_content).decode()
+		logger.info(f"Job {job_id} file read successfully, size: {len(file_content)} bytes")
+
+		# Clean up the file after download
+		try:
+			os.remove(file_path)
+			logger.info(f"Job {job_id} file cleaned up")
+		except Exception as e:
+			logger.warning(f"Error removing file {file_path}: {str(e)}")
+
+		return {
+			'success': True,
+			'file_data': file_data,
+			'filename': job_info.get('filename'),
+			'total_doctypes': job_info.get('total_doctypes'),
+			'total_records': job_info.get('total_records'),
+			'total_files': job_info.get('total_files', 0)
+		}
+
+	except Exception as e:
+		logger.error(f"Error downloading backup {job_id}: {str(e)}")
+		frappe.log_error(f"Download failed: {str(e)}", f"Backup Download Error")
+		raise
 
 
 def create_json_backup(doctypes, include_files=False, job_id=None):
@@ -435,15 +484,39 @@ def create_json_backup(doctypes, include_files=False, job_id=None):
 			if job_id:
 				update_job_progress(job_id, f"Adding {len(file_paths)} files to backup...")
 
+			files_added = 0
+			files_failed = 0
+
 			for file_info in file_paths:
 				try:
-					file_path = frappe.get_site_path() + file_info['file_path']
+					# Handle both absolute and relative paths
+					file_url = file_info['file_path']
+
+					# Get the actual file path on disk
+					if file_url.startswith('/files/'):
+						# Public file
+						file_path = frappe.get_site_path('public', 'files', file_url.replace('/files/', ''))
+					elif file_url.startswith('/private/files/'):
+						# Private file
+						file_path = frappe.get_site_path('private', 'files', file_url.replace('/private/files/', ''))
+					else:
+						# Try direct path
+						file_path = frappe.get_site_path() + file_url
+
 					if os.path.exists(file_path):
 						# Add file with relative path in zip
-						arcname = f"files{file_info['file_path']}"
+						arcname = f"files{file_url}"
 						zip_file.write(file_path, arcname)
+						files_added += 1
+						logger.debug(f"Added file: {file_url}")
+					else:
+						logger.warning(f"File not found: {file_path}")
+						files_failed += 1
 				except Exception as e:
-					frappe.log_error(f"Error adding file {file_info['file_path']}: {str(e)}")
+					logger.error(f"Error adding file {file_info.get('file_path')}: {str(e)}")
+					files_failed += 1
+
+			logger.info(f"Files added: {files_added}, failed: {files_failed}")
 
 	# Encode to base64 for download
 	zip_buffer.seek(0)
@@ -570,14 +643,38 @@ SET FOREIGN_KEY_CHECKS=0;
 			zip_file.writestr('backup.sql', sql_content)
 
 			# Add files
+			files_added = 0
+			files_failed = 0
+
 			for file_info in file_paths:
 				try:
-					file_path = frappe.get_site_path() + file_info['file_path']
+					# Handle both absolute and relative paths
+					file_url = file_info['file_path']
+
+					# Get the actual file path on disk
+					if file_url.startswith('/files/'):
+						# Public file
+						file_path = frappe.get_site_path('public', 'files', file_url.replace('/files/', ''))
+					elif file_url.startswith('/private/files/'):
+						# Private file
+						file_path = frappe.get_site_path('private', 'files', file_url.replace('/private/files/', ''))
+					else:
+						# Try direct path
+						file_path = frappe.get_site_path() + file_url
+
 					if os.path.exists(file_path):
-						arcname = f"files{file_info['file_path']}"
+						arcname = f"files{file_url}"
 						zip_file.write(file_path, arcname)
+						files_added += 1
+						logger.debug(f"Added file: {file_url}")
+					else:
+						logger.warning(f"File not found: {file_path}")
+						files_failed += 1
 				except Exception as e:
-					frappe.log_error(f"Error adding file {file_info['file_path']}: {str(e)}")
+					logger.error(f"Error adding file {file_info.get('file_path')}: {str(e)}")
+					files_failed += 1
+
+			logger.info(f"SQL backup - Files added: {files_added}, failed: {files_failed}")
 
 		zip_buffer.seek(0)
 		file_data = base64.b64encode(zip_buffer.getvalue()).decode()
@@ -647,18 +744,23 @@ def get_doctype_files(doctype_name, records):
 		list: List of file info dictionaries with file_path
 	"""
 	file_list = []
+	seen_files = set()  # Track unique files
 
 	if not records:
+		logger.info(f"No records for {doctype_name}")
 		return file_list
 
 	# Get all record names
 	record_names = [r.get('name') for r in records if r.get('name')]
 
 	if not record_names:
+		logger.warning(f"No record names found for {doctype_name}")
 		return file_list
 
-	# Query File doctype for attachments linked to these records
+	logger.info(f"Getting files for {doctype_name}, {len(record_names)} records")
+
 	try:
+		# Method 1: Query File doctype for attachments linked to these records
 		files = frappe.get_all(
 			'File',
 			filters={
@@ -668,20 +770,52 @@ def get_doctype_files(doctype_name, records):
 			fields=['name', 'file_url', 'file_name', 'attached_to_name']
 		)
 
+		logger.info(f"Found {len(files)} files in File doctype for {doctype_name}")
+
 		for file_doc in files:
 			if file_doc.file_url:
 				# Convert URL to file path
 				file_url = file_doc.file_url
 				if file_url.startswith('/files/') or file_url.startswith('/private/files/'):
-					file_list.append({
-						'file_path': file_url,
-						'file_name': file_doc.file_name,
-						'attached_to': file_doc.attached_to_name
-					})
+					if file_url not in seen_files:
+						file_list.append({
+							'file_path': file_url,
+							'file_name': file_doc.file_name,
+							'attached_to': file_doc.attached_to_name
+						})
+						seen_files.add(file_url)
+
+		# Method 2: Check for Attach and Attach Image fields in DocType
+		doctype_meta = frappe.get_meta(doctype_name)
+		attach_fields = []
+
+		for field in doctype_meta.fields:
+			if field.fieldtype in ['Attach', 'Attach Image']:
+				attach_fields.append(field.fieldname)
+
+		if attach_fields:
+			logger.info(f"{doctype_name} has attach fields: {attach_fields}")
+
+			# Check each record for file URLs in attach fields
+			for record in records:
+				for field_name in attach_fields:
+					file_url = record.get(field_name)
+					if file_url and isinstance(file_url, str):
+						if file_url.startswith('/files/') or file_url.startswith('/private/files/'):
+							if file_url not in seen_files:
+								file_list.append({
+									'file_path': file_url,
+									'file_name': os.path.basename(file_url),
+									'attached_to': record.get('name'),
+									'field': field_name
+								})
+								seen_files.add(file_url)
 
 	except Exception as e:
-		frappe.log_error(f"Error getting files for {doctype_name}: {str(e)}")
+		logger.error(f"Error getting files for {doctype_name}: {str(e)}")
+		frappe.log_error(f"File collection error: {str(e)}", f"Get Files - {doctype_name}")
 
+	logger.info(f"Total files collected for {doctype_name}: {len(file_list)}")
 	return file_list
 
 

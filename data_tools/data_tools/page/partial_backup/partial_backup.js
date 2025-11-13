@@ -556,54 +556,73 @@ class PartialBackupPage {
 	download_backup(job_id) {
 		const status_elem = this.page.main.find('#backup-status');
 
+		console.log('Downloading backup for job_id:', job_id);
+
 		frappe.call({
 			method: 'data_tools.data_tools.page.partial_backup.partial_backup.download_backup',
 			args: {
 				job_id: job_id
 			},
 			callback: (r) => {
+				console.log('Download response:', r);
+
 				if (r.message && r.message.success) {
 					const result = r.message;
+					console.log('Result:', result);
+					console.log('Filename:', result.filename);
+					console.log('File data length:', result.file_data ? result.file_data.length : 0);
 
-					// Download the file
-					const binary_data = atob(result.file_data);
-					const array = new Uint8Array(binary_data.length);
-					for (let i = 0; i < binary_data.length; i++) {
-						array[i] = binary_data.charCodeAt(i);
+					try {
+						// Download the file
+						const binary_data = atob(result.file_data);
+						const array = new Uint8Array(binary_data.length);
+						for (let i = 0; i < binary_data.length; i++) {
+							array[i] = binary_data.charCodeAt(i);
+						}
+
+						console.log('Binary data length:', binary_data.length);
+
+						// Set correct MIME type based on export format
+						const mime_type = this.export_format === 'sql'
+							? 'application/sql'
+							: 'application/zip';
+						const blob = new Blob([array], { type: mime_type });
+						console.log('Blob created, size:', blob.size);
+
+						const url = window.URL.createObjectURL(blob);
+						const a = document.createElement('a');
+						a.href = url;
+						a.download = result.filename;
+						document.body.appendChild(a);
+						a.click();
+						console.log('Download triggered');
+						document.body.removeChild(a);
+						window.URL.revokeObjectURL(url);
+
+						status_elem.html(
+							`<span class="text-success">
+								<span class="fa fa-check"></span>
+								Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
+								${result.total_files ? `, ${result.total_files} files` : ''}
+							</span>`
+						);
+
+						frappe.show_alert({
+							message: __('Backup downloaded successfully'),
+							indicator: 'green'
+						});
+					} catch (e) {
+						console.error('Error processing download:', e);
+						status_elem.html('<span class="text-danger">Error processing download: ' + e.message + '</span>');
 					}
-
-					// Set correct MIME type based on export format
-					const mime_type = this.export_format === 'sql'
-						? 'application/sql'
-						: 'application/zip';
-					const blob = new Blob([array], { type: mime_type });
-					const url = window.URL.createObjectURL(blob);
-					const a = document.createElement('a');
-					a.href = url;
-					a.download = result.filename;
-					document.body.appendChild(a);
-					a.click();
-					document.body.removeChild(a);
-					window.URL.revokeObjectURL(url);
-
-					status_elem.html(
-						`<span class="text-success">
-							<span class="fa fa-check"></span>
-							Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
-							${result.total_files ? `, ${result.total_files} files` : ''}
-						</span>`
-					);
-
-					frappe.show_alert({
-						message: __('Backup downloaded successfully'),
-						indicator: 'green'
-					});
 				} else {
+					console.error('Invalid response:', r);
 					status_elem.html('<span class="text-danger">Failed to download backup</span>');
 				}
 			},
-			error: () => {
-				status_elem.html('<span class="text-danger">Error downloading backup</span>');
+			error: (r) => {
+				console.error('Download error:', r);
+				status_elem.html('<span class="text-danger">Error downloading backup: ' + (r.message || 'Unknown error') + '</span>');
 			}
 		});
 	}
