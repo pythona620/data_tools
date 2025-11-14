@@ -1,12 +1,12 @@
 # Data Tools
 
-A comprehensive Frappe app for creating partial backups and restoring specific DocTypes. This tool allows you to selectively backup and restore data without affecting the entire database.
+A comprehensive Frappe app for creating partial backups, restoring specific DocTypes, and managing DocType schemas. This tool allows you to selectively backup and restore data, as well as export and import DocType definitions without affecting the entire database.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Overview
 
-Data Tools provides a flexible and user-friendly interface for managing partial backups in Frappe applications. Whether you need to migrate specific modules, backup critical data, or restore selective DocTypes, this app streamlines the entire process.
+Data Tools provides a flexible and user-friendly interface for managing partial backups and DocType schemas in Frappe applications. Whether you need to migrate specific modules, backup critical data, restore selective DocTypes, or transfer DocType structures between sites, this app streamlines the entire process.
 
 ## Features
 
@@ -49,6 +49,51 @@ Restore data from backup files with preview and control:
 - Error handling without stopping entire process
 
 ![Partial Restore Interface](C:\Users\CaratRED\Desktop\Restore.png)
+
+### 3. DocType Export
+
+Export only DocType schemas (definitions) without data:
+
+- **Schema-Only Export**: Export just the DocType structure, not the data
+- **Multi-select Interface**: Select multiple DocTypes for export
+- **App & Module Filtering**: Filter DocTypes by app or module
+- **Search Functionality**: Quickly find specific DocTypes
+- **Compressed Output**: Generates ZIP files containing DocType definitions
+
+**What's Included in Exports:**
+- DocType definitions (complete schema including fields, permissions, etc.)
+- DocType metadata (module, custom flag, single flag)
+- Export information (creator, date, Frappe version)
+- NO data records (use Partial Backup for data export)
+
+**Use Cases:**
+- Migrate DocType structures from development to production
+- Share custom DocType templates with other installations
+- Backup custom DocType configurations
+- Transfer data models between sites
+
+### 4. DocType Import
+
+Import DocType schemas from export files:
+
+- **File Upload**: Upload DocType export ZIP files
+- **Preview Before Import**: View all DocTypes in the export file
+- **Selective Import**: Choose which DocTypes to import
+- **Smart Handling**: Creates new DocTypes or updates existing custom DocTypes
+- **Safety Features**: Skips standard DocTypes to prevent system issues
+- **Detailed Logging**: See exactly what was imported, updated, or skipped
+
+**Import Behavior:**
+- Standard DocTypes: Skipped (cannot modify system DocTypes)
+- Custom DocTypes (existing): Updated with new definition
+- Custom DocTypes (new): Created
+- Detailed log showing success/errors/skipped items
+
+**Use Cases:**
+- Import DocType structures from other Frappe sites
+- Deploy custom DocTypes to production
+- Restore DocType configurations from backups
+- Share and reuse custom data models
 
 ## Installation
 
@@ -148,6 +193,72 @@ bench restart
      - Total successful restorations
      - Total errors
 
+### Exporting DocType Schemas
+
+1. **Access the Page**
+   - Navigate to **DocType Export** page from the Desk
+   - Or search for "DocType Export" in the Awesome Bar
+
+2. **Filter and Select DocTypes** (Optional)
+   - Use the **App Filter** to filter DocTypes by application
+   - Use the **Module Filter** dropdown to filter by module
+   - Use the **Search** box to find specific DocTypes
+   - Select DocTypes using checkboxes
+
+3. **Export DocTypes**
+   - Click the **Export DocTypes** button
+   - The export file will be automatically downloaded as a ZIP file
+   - File naming format: `doctype_export_YYYYMMDD_HHMMSS.zip`
+
+4. **What Gets Exported**
+   - DocType schema/definition only (no data records)
+   - DocType fields and their configurations
+   - Permissions and roles
+   - DocType metadata
+
+### Importing DocType Schemas
+
+1. **Access the Page**
+   - Navigate to **DocType Import** page from the Desk
+   - Or search for "DocType Import" in the Awesome Bar
+
+2. **Upload Export File**
+   - Click on the file upload control
+   - Select your DocType export ZIP file
+   - The file will be automatically parsed and previewed
+
+3. **Preview Export Contents**
+   - Review the export information:
+     - Created by (user who created the export)
+     - Creation date
+     - Frappe version
+     - Total DocTypes
+   - View the DocType list showing:
+     - DocType names
+     - Module information
+     - Status (Will create/Will update)
+     - Custom vs Standard flag
+
+4. **Select DocTypes to Import**
+   - All DocTypes are selected by default
+   - Deselect any DocTypes you don't want to import
+   - Use **Select All** or **Deselect All** buttons for bulk selection
+
+5. **Import DocTypes**
+   - Click the **Import Selected DocTypes** button
+   - Wait for the import process to complete
+
+6. **Review Import Log**
+   - Check the detailed import log showing:
+     - **Success**: DocTypes created or updated successfully
+     - **Errors**: Any DocTypes that failed to import
+     - **Skipped**: Standard DocTypes that were skipped for safety
+   - View summary statistics:
+     - Total DocTypes processed
+     - Successful imports
+     - Errors
+     - Skipped items
+
 ## Technical Details
 
 ### Backup Format
@@ -180,6 +291,44 @@ partial_backup_YYYYMMDD_HHMMSS.zip
 }
 ```
 
+### DocType Export Format
+
+**File Structure:**
+```
+doctype_export_YYYYMMDD_HHMMSS.zip
+├── doctype_schemas.json    # DocType definitions only (no data)
+└── metadata.json            # Quick metadata for preview
+```
+
+**JSON Structure:**
+```json
+{
+  "export_info": {
+    "created_by": "user@example.com",
+    "creation_date": "2025-11-14 10:30:00",
+    "frappe_version": "15.0.0",
+    "total_doctypes": 3,
+    "export_type": "doctype_schemas_only"
+  },
+  "doctypes": [
+    {
+      "doctype": "My Custom DocType",
+      "definition": { /* Complete DocType schema */ },
+      "module": "Custom Module",
+      "is_custom": 1,
+      "is_single": 0
+    }
+  ]
+}
+```
+
+**Key Differences from Partial Backup:**
+- NO data records included
+- Smaller file size (only schemas)
+- Faster export/import
+- Ideal for migrating DocType structures
+- Safe to share (no sensitive data)
+
 ### Data Handling
 
 **Backup Process:**
@@ -206,6 +355,16 @@ partial_backup_YYYYMMDD_HHMMSS.zip
 | Import error occurs | Logs error and continues with next record |
 | Critical error | Rolls back transaction for that DocType |
 
+### DocType Import Behavior
+
+| Scenario | Action |
+|----------|--------|
+| Custom DocType (new) | Creates DocType from definition |
+| Custom DocType (exists) | Updates DocType with new definition |
+| Standard DocType | Skipped (safety - cannot modify system DocTypes) |
+| Import error occurs | Logs error and continues with next DocType |
+| Critical error | Rolls back transaction for that DocType |
+
 ### Error Handling
 
 - **Logging**: All errors are logged to Error Log
@@ -215,29 +374,49 @@ partial_backup_YYYYMMDD_HHMMSS.zip
 
 ## Use Cases
 
-1. **Module Migration**: Move specific modules between instances
+### Partial Backup & Restore
+1. **Module Migration**: Move specific modules with data between instances
 2. **Data Transfer**: Copy master data to new sites
 3. **Testing**: Create test data sets for development
 4. **Disaster Recovery**: Backup critical DocTypes regularly
 5. **Selective Restore**: Restore only what you need without full database restore
 6. **Data Archival**: Create snapshots of specific data for compliance
 
+### DocType Export & Import
+1. **Development to Production**: Deploy custom DocTypes from dev to production
+2. **Multi-site Deployment**: Share DocType structures across multiple installations
+3. **DocType Templates**: Create and share reusable DocType templates
+4. **Configuration Backup**: Backup custom DocType configurations
+5. **Team Collaboration**: Share data models with team members
+6. **Version Control**: Track changes to DocType structures over time
+
 ## Permissions
 
-Both Partial Backup and Partial Restore pages require **System Manager** role by default.
+All pages require **System Manager** role by default.
 
 To customize permissions, you can modify the page JSON files:
 - `data_tools/data_tools/page/partial_backup/partial_backup.json`
 - `data_tools/data_tools/page/partial_restore/partial_restore.json`
+- `data_tools/data_tools/page/doctype_export/doctype_export.json`
+- `data_tools/data_tools/page/doctype_import/doctype_import.json`
 
 ## Best Practices
 
+### For Partial Backup & Restore
 1. **Regular Backups**: Schedule regular backups of critical DocTypes
 2. **Test Restores**: Verify backups by testing restore on a development instance
 3. **Version Compatibility**: Ensure Frappe versions match between backup and restore sites
 4. **Storage**: Store backup files in a secure, backed-up location
 5. **Documentation**: Keep track of what's in each backup file
 6. **Validation**: Always review the preview before restoring
+
+### For DocType Export & Import
+1. **Test First**: Always test imports on a development site first
+2. **Custom Only**: Only export/import custom DocTypes when possible
+3. **Document Changes**: Keep track of what DocTypes you're deploying
+4. **Version Control**: Store export files in version control for tracking
+5. **Review Before Import**: Always review the preview before importing
+6. **Backup First**: Create a backup before importing DocTypes to production
 
 ## Troubleshooting
 
@@ -330,6 +509,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ## Changelog
+
+### Version 1.1.0
+- **NEW**: DocType Export - Export only DocType schemas without data
+- **NEW**: DocType Import - Import DocType schemas with preview and selective import
+- Enhanced app filtering for all pages
+- Improved documentation and usage guides
+- Safety features for standard DocType protection
 
 ### Version 1.0.0
 - Initial release
