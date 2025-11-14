@@ -36,7 +36,6 @@ def get_all_doctypes():
 		FROM `tabDocType`
 		WHERE
 			istable = 0
-			AND name NOT LIKE 'DocType%'
 		ORDER BY module, name
 	""", as_dict=True)
 
@@ -123,7 +122,6 @@ def get_doctypes_by_app(app_names):
 		FROM `tabDocType`
 		WHERE
 			istable = 0
-			AND name NOT LIKE 'DocType%%'
 			AND module IN %(modules)s
 		ORDER BY module, name
 	""", {"modules": all_modules}, as_dict=True)
