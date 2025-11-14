@@ -423,6 +423,82 @@ class PartialBackupPage {
 			return;
 		}
 
+		// First check for dependencies
+		frappe.call({
+			method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_doctype_dependencies',
+			args: {
+				doctypes: this.selected_doctypes
+			},
+			callback: (r) => {
+				if (r.message && r.message.has_dependencies) {
+					// Show dependency dialog
+					this.show_dependency_dialog(r.message);
+				} else {
+					// No dependencies, proceed directly
+					this.show_backup_options_dialog();
+				}
+			}
+		});
+	}
+
+	show_dependency_dialog(dependency_data) {
+		const dep_list = dependency_data.all_new_dependencies || [];
+		const dep_by_doctype = dependency_data.dependencies_by_doctype || {};
+
+		let dep_html = '<div style="margin: 10px 0;"><p class="text-warning"><strong>Warning:</strong> The selected DocTypes have dependencies!</p>';
+		dep_html += '<div style="max-height: 300px; overflow-y: auto; border: 1px solid #d1d8dd; padding: 10px; border-radius: 4px; background: #f9f9f9;">';
+
+		for (let doctype in dep_by_doctype) {
+			const deps = dep_by_doctype[doctype];
+			if (deps.length > 0) {
+				dep_html += `<div style="margin: 8px 0;"><strong>${doctype}</strong> depends on: `;
+				dep_html += deps.map(d => `<span class="badge" style="background-color: #f39c12; color: white; margin: 2px;">${d}</span>`).join(' ');
+				dep_html += '</div>';
+			}
+		}
+
+		dep_html += '</div>';
+		dep_html += `<p class="text-muted small" style="margin-top: 10px;">Found ${dep_list.length} dependent DocType(s) not in your selection.</p></div>`;
+
+		const dep_dialog = new frappe.ui.Dialog({
+			title: __('Dependencies Detected'),
+			fields: [
+				{
+					fieldtype: 'HTML',
+					options: dep_html
+				},
+				{
+					fieldname: 'include_dependencies',
+					fieldtype: 'Check',
+					label: __('Include all dependencies in backup'),
+					default: 1,
+					description: __('Recommended: Include dependencies to ensure successful restore')
+				}
+			],
+			primary_action_label: __('Continue'),
+			primary_action: (values) => {
+				dep_dialog.hide();
+
+				// Add dependencies to selection if user chose to include them
+				if (values.include_dependencies) {
+					const all_doctypes = [...this.selected_doctypes, ...dep_list];
+					// Remove duplicates
+					this.selected_doctypes = [...new Set(all_doctypes)];
+					frappe.show_alert({
+						message: __(`Added ${dep_list.length} dependent DocType(s) to backup`),
+						indicator: 'green'
+					}, 3);
+				}
+
+				// Proceed to backup options
+				this.show_backup_options_dialog();
+			}
+		});
+
+		dep_dialog.show();
+	}
+
+	show_backup_options_dialog() {
 		// Ask user: Backup Now or Schedule
 		const choice_dialog = new frappe.ui.Dialog({
 			title: __('Backup Options'),

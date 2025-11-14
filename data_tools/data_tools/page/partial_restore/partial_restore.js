@@ -205,19 +205,57 @@ class PartialRestorePage {
 			__('Are you sure you want to restore this backup? This will import all records from the backup file.'),
 			() => {
 				const status_elem = this.page.main.find('#restore-status');
-				status_elem.html('<span class="text-primary">Restoring backup...</span>');
+				status_elem.html('<span class="text-primary"><span class="fa fa-spinner fa-spin"></span> Starting restore job...</span>');
 
+				// Start background job
 				frappe.call({
-					method: 'data_tools.data_tools.page.partial_restore.partial_restore.restore_backup',
+					method: 'data_tools.data_tools.page.partial_restore.partial_restore.start_restore_job',
 					args: {
 						file_data: this.file_data,
 						filename: this.filename
 					},
-					freeze: true,
-					freeze_message: __('Restoring backup... This may take a while.'),
 					callback: (r) => {
-						if (r.message && r.message.success) {
-							const result = r.message;
+						if (r.message && r.message.success && r.message.job_id) {
+							this.job_id = r.message.job_id;
+							status_elem.html(
+								`<span class="text-primary">
+									<span class="fa fa-spinner fa-spin"></span>
+									Restore in progress... Please wait.
+								</span>`
+							);
+
+							// Start polling for job status
+							this.poll_restore_job_status();
+						} else {
+							status_elem.html('<span class="text-danger">Failed to start restore job</span>');
+							frappe.msgprint(__('Error starting restore. Please try again.'));
+						}
+					},
+					error: () => {
+						status_elem.html('<span class="text-danger">Failed to start restore job</span>');
+						frappe.msgprint(__('Error starting restore. Please check the error log.'));
+					}
+				});
+			}
+		);
+	}
+
+	poll_restore_job_status() {
+		const status_elem = this.page.main.find('#restore-status');
+
+		const check_status = () => {
+			frappe.call({
+				method: 'data_tools.data_tools.page.partial_restore.partial_restore.get_restore_job_status',
+				args: {
+					job_id: this.job_id
+				},
+				callback: (r) => {
+					if (r.message) {
+						const job_data = r.message;
+
+						if (job_data.status === 'completed') {
+							// Job completed successfully
+							const result = job_data.result;
 							this.show_restore_log(result);
 
 							status_elem.html(
@@ -230,19 +268,40 @@ class PartialRestorePage {
 							frappe.show_alert({
 								message: __('Backup restored successfully'),
 								indicator: 'green'
-							});
-						} else {
+							}, 5);
+
+						} else if (job_data.status === 'failed') {
+							// Job failed
 							status_elem.html('<span class="text-danger">Restore failed</span>');
-							frappe.msgprint(__('Error restoring backup: ' + (r.message.error || 'Unknown error')));
+							frappe.msgprint(__('Error restoring backup: ' + (job_data.error || 'Unknown error')));
+
+						} else if (job_data.status === 'running' || job_data.status === 'queued') {
+							// Job still running - update progress and poll again
+							const progress_msg = job_data.progress || 'Processing...';
+							status_elem.html(
+								`<span class="text-primary">
+									<span class="fa fa-spinner fa-spin"></span>
+									${progress_msg}
+								</span>`
+							);
+
+							// Poll again after 2 seconds
+							setTimeout(check_status, 2000);
+
+						} else {
+							// Unknown status
+							status_elem.html('<span class="text-warning">Unknown job status</span>');
 						}
-					},
-					error: () => {
-						status_elem.html('<span class="text-danger">Restore failed</span>');
-						frappe.msgprint(__('Error restoring backup. Please check the error log.'));
 					}
-				});
-			}
-		);
+				},
+				error: () => {
+					status_elem.html('<span class="text-danger">Error checking job status</span>');
+				}
+			});
+		};
+
+		// Start polling
+		check_status();
 	}
 
 	show_restore_log(result) {

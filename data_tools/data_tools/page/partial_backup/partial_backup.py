@@ -15,6 +15,11 @@ from frappe.utils.background_jobs import enqueue
 import shutil
 from pathlib import Path
 import logging
+from data_tools.data_tools.doctype_dependencies import (
+	get_dependency_summary,
+	get_dependency_graph,
+	topological_sort
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +131,71 @@ def get_doctypes_by_app(app_names):
 	logger.info(f"Found {len(doctypes)} DocTypes")
 
 	return doctypes
+
+
+@frappe.whitelist()
+def get_doctype_dependencies(doctypes):
+	"""Get dependency information for selected DocTypes
+
+	Args:
+		doctypes: List of DocType names or JSON string
+
+	Returns:
+		dict: Dependency summary including all dependent DocTypes
+	"""
+	if isinstance(doctypes, str):
+		doctypes = json.loads(doctypes)
+
+	if not doctypes or not isinstance(doctypes, list):
+		return {
+			'selected_doctypes': [],
+			'selected_count': 0,
+			'dependencies_by_doctype': {},
+			'all_new_dependencies': [],
+			'new_dependency_count': 0,
+			'total_with_dependencies': 0,
+			'has_dependencies': False
+		}
+
+	return get_dependency_summary(doctypes)
+
+
+@frappe.whitelist()
+def get_dependency_graph_data(doctypes):
+	"""Get dependency graph data for visualization
+
+	Args:
+		doctypes: List of DocType names or JSON string
+
+	Returns:
+		dict: Graph data with nodes and edges
+	"""
+	if isinstance(doctypes, str):
+		doctypes = json.loads(doctypes)
+
+	if not doctypes or not isinstance(doctypes, list):
+		return {'nodes': [], 'edges': [], 'selected_count': 0, 'dependency_count': 0, 'total_count': 0}
+
+	return get_dependency_graph(doctypes)
+
+
+@frappe.whitelist()
+def sort_doctypes_by_dependencies(doctypes):
+	"""Sort DocTypes in correct order based on dependencies
+
+	Args:
+		doctypes: List of DocType names or JSON string
+
+	Returns:
+		list: Sorted list of DocTypes
+	"""
+	if isinstance(doctypes, str):
+		doctypes = json.loads(doctypes)
+
+	if not doctypes or not isinstance(doctypes, list):
+		return []
+
+	return topological_sort(doctypes)
 
 
 @frappe.whitelist()
