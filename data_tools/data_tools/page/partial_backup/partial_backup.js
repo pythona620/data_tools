@@ -423,6 +423,82 @@ class PartialBackupPage {
 			return;
 		}
 
+		// First check for dependencies
+		frappe.call({
+			method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_doctype_dependencies',
+			args: {
+				doctypes: this.selected_doctypes
+			},
+			callback: (r) => {
+				if (r.message && r.message.has_dependencies) {
+					// Show dependency dialog
+					this.show_dependency_dialog(r.message);
+				} else {
+					// No dependencies, proceed directly
+					this.show_backup_options_dialog();
+				}
+			}
+		});
+	}
+
+	show_dependency_dialog(dependency_data) {
+		const dep_list = dependency_data.all_new_dependencies || [];
+		const dep_by_doctype = dependency_data.dependencies_by_doctype || {};
+
+		let dep_html = '<div style="margin: 10px 0;"><p class="text-warning"><strong>Warning:</strong> The selected DocTypes have dependencies!</p>';
+		dep_html += '<div style="max-height: 300px; overflow-y: auto; border: 1px solid #d1d8dd; padding: 10px; border-radius: 4px; background: #f9f9f9;">';
+
+		for (let doctype in dep_by_doctype) {
+			const deps = dep_by_doctype[doctype];
+			if (deps.length > 0) {
+				dep_html += `<div style="margin: 8px 0;"><strong>${doctype}</strong> depends on: `;
+				dep_html += deps.map(d => `<span class="badge" style="background-color: #f39c12; color: white; margin: 2px;">${d}</span>`).join(' ');
+				dep_html += '</div>';
+			}
+		}
+
+		dep_html += '</div>';
+		dep_html += `<p class="text-muted small" style="margin-top: 10px;">Found ${dep_list.length} dependent DocType(s) not in your selection.</p></div>`;
+
+		const dep_dialog = new frappe.ui.Dialog({
+			title: __('Dependencies Detected'),
+			fields: [
+				{
+					fieldtype: 'HTML',
+					options: dep_html
+				},
+				{
+					fieldname: 'include_dependencies',
+					fieldtype: 'Check',
+					label: __('Include all dependencies in backup'),
+					default: 1,
+					description: __('Recommended: Include dependencies to ensure successful restore')
+				}
+			],
+			primary_action_label: __('Continue'),
+			primary_action: (values) => {
+				dep_dialog.hide();
+
+				// Add dependencies to selection if user chose to include them
+				if (values.include_dependencies) {
+					const all_doctypes = [...this.selected_doctypes, ...dep_list];
+					// Remove duplicates
+					this.selected_doctypes = [...new Set(all_doctypes)];
+					frappe.show_alert({
+						message: __(`Added ${dep_list.length} dependent DocType(s) to backup`),
+						indicator: 'green'
+					}, 3);
+				}
+
+				// Proceed to backup options
+				this.show_backup_options_dialog();
+			}
+		});
+
+		dep_dialog.show();
+	}
+
+	show_backup_options_dialog() {
 		// Ask user: Backup Now or Schedule
 		const choice_dialog = new frappe.ui.Dialog({
 			title: __('Backup Options'),
@@ -556,54 +632,73 @@ class PartialBackupPage {
 	download_backup(job_id) {
 		const status_elem = this.page.main.find('#backup-status');
 
+		console.log('Downloading backup for job_id:', job_id);
+
 		frappe.call({
 			method: 'data_tools.data_tools.page.partial_backup.partial_backup.download_backup',
 			args: {
 				job_id: job_id
 			},
 			callback: (r) => {
+				console.log('Download response:', r);
+
 				if (r.message && r.message.success) {
 					const result = r.message;
+					console.log('Result:', result);
+					console.log('Filename:', result.filename);
+					console.log('File data length:', result.file_data ? result.file_data.length : 0);
 
-					// Download the file
-					const binary_data = atob(result.file_data);
-					const array = new Uint8Array(binary_data.length);
-					for (let i = 0; i < binary_data.length; i++) {
-						array[i] = binary_data.charCodeAt(i);
+					try {
+						// Download the file
+						const binary_data = atob(result.file_data);
+						const array = new Uint8Array(binary_data.length);
+						for (let i = 0; i < binary_data.length; i++) {
+							array[i] = binary_data.charCodeAt(i);
+						}
+
+						console.log('Binary data length:', binary_data.length);
+
+						// Set correct MIME type based on export format
+						const mime_type = this.export_format === 'sql'
+							? 'application/sql'
+							: 'application/zip';
+						const blob = new Blob([array], { type: mime_type });
+						console.log('Blob created, size:', blob.size);
+
+						const url = window.URL.createObjectURL(blob);
+						const a = document.createElement('a');
+						a.href = url;
+						a.download = result.filename;
+						document.body.appendChild(a);
+						a.click();
+						console.log('Download triggered');
+						document.body.removeChild(a);
+						window.URL.revokeObjectURL(url);
+
+						status_elem.html(
+							`<span class="text-success">
+								<span class="fa fa-check"></span>
+								Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
+								${result.total_files ? `, ${result.total_files} files` : ''}
+							</span>`
+						);
+
+						frappe.show_alert({
+							message: __('Backup downloaded successfully'),
+							indicator: 'green'
+						});
+					} catch (e) {
+						console.error('Error processing download:', e);
+						status_elem.html('<span class="text-danger">Error processing download: ' + e.message + '</span>');
 					}
-
-					// Set correct MIME type based on export format
-					const mime_type = this.export_format === 'sql'
-						? 'application/sql'
-						: 'application/zip';
-					const blob = new Blob([array], { type: mime_type });
-					const url = window.URL.createObjectURL(blob);
-					const a = document.createElement('a');
-					a.href = url;
-					a.download = result.filename;
-					document.body.appendChild(a);
-					a.click();
-					document.body.removeChild(a);
-					window.URL.revokeObjectURL(url);
-
-					status_elem.html(
-						`<span class="text-success">
-							<span class="fa fa-check"></span>
-							Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
-							${result.total_files ? `, ${result.total_files} files` : ''}
-						</span>`
-					);
-
-					frappe.show_alert({
-						message: __('Backup downloaded successfully'),
-						indicator: 'green'
-					});
 				} else {
+					console.error('Invalid response:', r);
 					status_elem.html('<span class="text-danger">Failed to download backup</span>');
 				}
 			},
-			error: () => {
-				status_elem.html('<span class="text-danger">Error downloading backup</span>');
+			error: (r) => {
+				console.error('Download error:', r);
+				status_elem.html('<span class="text-danger">Error downloading backup: ' + (r.message || 'Unknown error') + '</span>');
 			}
 		});
 	}

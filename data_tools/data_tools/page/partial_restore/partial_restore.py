@@ -8,6 +8,12 @@ import zipfile
 from frappe import _
 from io import BytesIO
 import base64
+import uuid
+from frappe.utils.background_jobs import enqueue
+from data_tools.data_tools.doctype_dependencies import (
+	topological_sort,
+	validate_restore_order
+)
 
 
 @frappe.whitelist()
@@ -112,8 +118,148 @@ def parse_sql_file(file_bytes, filename):
 
 
 @frappe.whitelist()
+def start_restore_job(file_data, filename, selected_doctypes=None):
+	"""Start a background job for restore operation
+
+	Args:
+		file_data: Base64 encoded file data
+		filename: Name of the backup file
+		selected_doctypes: List of DocTypes to restore (optional)
+
+	Returns:
+		dict: Job information including job_id
+	"""
+	job_id = str(uuid.uuid4())
+
+	# Store file data in cache for background job
+	cache_key = f"restore_job_{job_id}"
+	frappe.cache().set_value(
+		cache_key,
+		{
+			'file_data': file_data,
+			'filename': filename,
+			'selected_doctypes': selected_doctypes,
+			'status': 'queued',
+			'progress': 'Restore job queued...'
+		},
+		expires_in_sec=7200  # 2 hours
+	)
+
+	# Enqueue background job
+	enqueue(
+		execute_restore_job,
+		queue='long',
+		timeout=3600,  # 1 hour timeout
+		job_id=job_id,
+		restore_job_id=job_id,
+		file_data=file_data,
+		filename=filename,
+		selected_doctypes=selected_doctypes
+	)
+
+	return {
+		'success': True,
+		'job_id': job_id,
+		'message': 'Restore job started'
+	}
+
+
+def execute_restore_job(restore_job_id, file_data, filename, selected_doctypes=None):
+	"""Execute restore operation in background
+
+	Args:
+		restore_job_id: Unique job identifier
+		file_data: Base64 encoded file data
+		filename: Name of the backup file
+		selected_doctypes: List of DocTypes to restore (optional)
+	"""
+	try:
+		update_job_progress(restore_job_id, 'Processing restore...')
+
+		# Perform restore
+		result = restore_backup_sync(file_data, filename, selected_doctypes, restore_job_id)
+
+		# Store result in cache
+		cache_key = f"restore_job_{restore_job_id}"
+		frappe.cache().set_value(
+			cache_key,
+			{
+				'status': 'completed' if result.get('success') else 'failed',
+				'progress': 'Restore completed',
+				'result': result
+			},
+			expires_in_sec=7200
+		)
+
+	except Exception as e:
+		frappe.log_error(f"Error in restore job {restore_job_id}: {str(e)}")
+		cache_key = f"restore_job_{restore_job_id}"
+		frappe.cache().set_value(
+			cache_key,
+			{
+				'status': 'failed',
+				'progress': 'Restore failed',
+				'error': str(e)
+			},
+			expires_in_sec=7200
+		)
+
+
+def update_job_progress(job_id, message):
+	"""Update restore job progress in cache
+
+	Args:
+		job_id: Job identifier
+		message: Progress message
+	"""
+	cache_key = f"restore_job_{job_id}"
+	job_data = frappe.cache().get_value(cache_key) or {}
+	job_data['progress'] = message
+	job_data['status'] = 'running'
+	frappe.cache().set_value(cache_key, job_data, expires_in_sec=7200)
+
+
+@frappe.whitelist()
+def get_restore_job_status(job_id):
+	"""Get status of restore job
+
+	Args:
+		job_id: Job identifier
+
+	Returns:
+		dict: Job status and progress
+	"""
+	cache_key = f"restore_job_{job_id}"
+	job_data = frappe.cache().get_value(cache_key)
+
+	if not job_data:
+		return {
+			'status': 'not_found',
+			'message': 'Job not found'
+		}
+
+	return job_data
+
+
+@frappe.whitelist()
 def restore_backup(file_data, filename, selected_doctypes=None):
-	"""Restore data from backup file"""
+	"""Restore data from backup file (wrapper that calls background job)"""
+	if selected_doctypes and isinstance(selected_doctypes, str):
+		selected_doctypes = json.loads(selected_doctypes)
+
+	# Start background job for restore
+	return start_restore_job(file_data, filename, selected_doctypes)
+
+
+def restore_backup_sync(file_data, filename, selected_doctypes=None, job_id=None):
+	"""Restore data from backup file (synchronous - used by background job)
+
+	Args:
+		file_data: Base64 encoded file data
+		filename: Backup filename
+		selected_doctypes: List of DocTypes to restore
+		job_id: Job ID for progress tracking
+	"""
 	try:
 		if selected_doctypes and isinstance(selected_doctypes, str):
 			selected_doctypes = json.loads(selected_doctypes)
@@ -123,21 +269,31 @@ def restore_backup(file_data, filename, selected_doctypes=None):
 
 		# Check if it's a SQL file or ZIP file
 		if filename.endswith('.sql'):
-			return restore_sql_backup(file_bytes, filename, selected_doctypes)
+			return restore_sql_backup(file_bytes, filename, selected_doctypes, job_id)
 		else:
-			return restore_json_backup(file_bytes, filename, selected_doctypes)
+			return restore_json_backup(file_bytes, filename, selected_doctypes, job_id)
 
 	except Exception as e:
-		frappe.log_error(f"Error in restore_backup: {str(e)}")
+		frappe.log_error(f"Error in restore_backup_sync: {str(e)}")
 		return {
 			"success": False,
 			"error": str(e)
 		}
 
 
-def restore_json_backup(file_bytes, filename, selected_doctypes=None):
-	"""Restore JSON backup file"""
+def restore_json_backup(file_bytes, filename, selected_doctypes=None, job_id=None):
+	"""Restore JSON backup file with dependency-aware ordering
+
+	Args:
+		file_bytes: Backup file bytes
+		filename: Backup filename
+		selected_doctypes: List of DocTypes to restore
+		job_id: Job ID for progress tracking
+	"""
 	try:
+		if job_id:
+			update_job_progress(job_id, 'Extracting backup data...')
+
 		# Extract from ZIP
 		zip_buffer = BytesIO(file_bytes)
 		with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
@@ -148,11 +304,38 @@ def restore_json_backup(file_bytes, filename, selected_doctypes=None):
 		success_count = 0
 		error_count = 0
 
-		for dt_data in backup_data.get("doctypes", []):
-			doctype_name = dt_data["doctype"]
+		# Get list of doctypes in backup
+		doctypes_in_backup = [dt["doctype"] for dt in backup_data.get("doctypes", [])]
 
-			# Skip if not selected (if selective restore)
-			if selected_doctypes and doctype_name not in selected_doctypes:
+		# Filter by selected doctypes if specified
+		if selected_doctypes:
+			doctypes_to_restore = [dt for dt in doctypes_in_backup if dt in selected_doctypes]
+		else:
+			doctypes_to_restore = doctypes_in_backup
+
+		# Sort doctypes by dependencies (topological sort)
+		if job_id:
+			update_job_progress(job_id, 'Analyzing dependencies and determining restore order...')
+
+		sorted_doctypes = topological_sort(doctypes_to_restore)
+
+		# Log the restore order
+		restore_log.append({
+			"doctype": "System",
+			"status": "info",
+			"message": f"Restore order determined: {' → '.join(sorted_doctypes)}"
+		})
+
+		# Create a lookup dictionary for quick access
+		doctype_data_map = {dt["doctype"]: dt for dt in backup_data.get("doctypes", [])}
+
+		# Restore in sorted order
+		for idx, doctype_name in enumerate(sorted_doctypes, 1):
+			if job_id:
+				update_job_progress(job_id, f'Restoring {doctype_name} ({idx}/{len(sorted_doctypes)})...')
+
+			dt_data = doctype_data_map.get(doctype_name)
+			if not dt_data:
 				continue
 
 			try:
@@ -269,9 +452,19 @@ def restore_json_backup(file_bytes, filename, selected_doctypes=None):
 		}
 
 
-def restore_sql_backup(file_bytes, filename, selected_doctypes=None):
-	"""Restore SQL backup file"""
+def restore_sql_backup(file_bytes, filename, selected_doctypes=None, job_id=None):
+	"""Restore SQL backup file
+
+	Args:
+		file_bytes: Backup file bytes
+		filename: Backup filename
+		selected_doctypes: List of DocTypes to restore (note: SQL restore is all-or-nothing)
+		job_id: Job ID for progress tracking
+	"""
 	try:
+		if job_id:
+			update_job_progress(job_id, 'Parsing SQL backup...')
+
 		sql_content = file_bytes.decode('utf-8')
 
 		restore_log = []
@@ -280,9 +473,11 @@ def restore_sql_backup(file_bytes, filename, selected_doctypes=None):
 
 		# If selective restore is enabled, we need to filter SQL statements
 		if selected_doctypes:
-			frappe.msgprint(_("Selective restore for SQL files will restore all data. " +
-							"Use JSON format for selective restore."),
-							indicator='orange')
+			restore_log.append({
+				"doctype": "System",
+				"status": "warning",
+				"message": "Note: SQL restore does not support selective restore. All data will be restored. Use JSON format for selective restore."
+			})
 
 		# Execute SQL statements
 		# Split by semicolon but be careful with statements
