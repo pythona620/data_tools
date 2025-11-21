@@ -445,20 +445,44 @@ class PartialBackupPage {
 		const dep_list = dependency_data.all_new_dependencies || [];
 		const dep_by_doctype = dependency_data.dependencies_by_doctype || {};
 
-		let dep_html = '<div style="margin: 10px 0;"><p class="text-warning"><strong>Warning:</strong> The selected DocTypes have dependencies!</p>';
+		let dep_html = '<div style="margin: 10px 0;">';
 		dep_html += '<div style="max-height: 300px; overflow-y: auto; border: 1px solid #d1d8dd; padding: 10px; border-radius: 4px; background: #f9f9f9;">';
 
 		for (let doctype in dep_by_doctype) {
 			const deps = dep_by_doctype[doctype];
 			if (deps.length > 0) {
-				dep_html += `<div style="margin: 8px 0;"><strong>${doctype}</strong> depends on: `;
-				dep_html += deps.map(d => `<span class="badge" style="background-color: #f39c12; color: white; margin: 2px;">${d}</span>`).join(' ');
-				dep_html += '</div>';
+				dep_html += `<div style="margin: 8px 0; display: flex; align-items: center; gap: 8px;">`;
+				dep_html += `<span class="text-warning" style="font-size: 16px; flex-shrink: 0;" title="Warning: Has dependencies">⚠️</span>`;
+				dep_html += `<div><strong>${doctype}</strong> depends on `;
+				dep_html += deps.map(d => `<span class="badge" style="background-color: #f39c12; color: white; margin: 2px;">${d}</span>`).join(', ');
+				dep_html += '</div></div>';
 			}
 		}
 
 		dep_html += '</div>';
 		dep_html += `<p class="text-muted small" style="margin-top: 10px;">Found ${dep_list.length} dependent DocType(s) not in your selection.</p></div>`;
+
+		// Create HTML for individual dependency checkboxes
+		let dep_checkboxes_html = '<div style="margin: 15px 0;"><label><strong>Select Dependencies to Include:</strong></label>';
+		dep_checkboxes_html += '<div style="max-height: 250px; overflow-y: auto; border: 1px solid #d1d8dd; padding: 10px; border-radius: 4px; background: white; margin-top: 5px;">';
+
+		if (dep_list.length > 0) {
+			dep_checkboxes_html += '<div style="margin-bottom: 10px;"><label style="font-weight: normal;"><input type="checkbox" id="select-all-deps" style="margin-right: 5px;"><strong>Select All</strong></label></div>';
+			dep_checkboxes_html += '<hr style="margin: 5px 0;">';
+
+			dep_list.forEach(dep => {
+				dep_checkboxes_html += `<div class="checkbox" style="margin: 5px 0;">
+					<label style="font-weight: normal; display: flex; align-items: center;">
+						<input type="checkbox" class="dep-checkbox" data-doctype="${dep}" checked style="margin-right: 8px;">
+						<span>${dep}</span>
+					</label>
+				</div>`;
+			});
+		} else {
+			dep_checkboxes_html += '<p class="text-muted">No dependencies found.</p>';
+		}
+
+		dep_checkboxes_html += '</div></div>';
 
 		const dep_dialog = new frappe.ui.Dialog({
 			title: __('Dependencies Detected'),
@@ -468,24 +492,27 @@ class PartialBackupPage {
 					options: dep_html
 				},
 				{
-					fieldname: 'include_dependencies',
-					fieldtype: 'Check',
-					label: __('Include all dependencies in backup'),
-					default: 1,
-					description: __('Recommended: Include dependencies to ensure successful restore')
+					fieldtype: 'HTML',
+					options: dep_checkboxes_html
 				}
 			],
 			primary_action_label: __('Continue'),
 			primary_action: (values) => {
+				// Get selected dependencies from checkboxes
+				const selected_deps = [];
+				dep_dialog.$wrapper.find('.dep-checkbox:checked').each(function() {
+					selected_deps.push($(this).data('doctype'));
+				});
+
 				dep_dialog.hide();
 
-				// Add dependencies to selection if user chose to include them
-				if (values.include_dependencies) {
-					const all_doctypes = [...this.selected_doctypes, ...dep_list];
+				// Add selected dependencies to selection
+				if (selected_deps.length > 0) {
+					const all_doctypes = [...this.selected_doctypes, ...selected_deps];
 					// Remove duplicates
 					this.selected_doctypes = [...new Set(all_doctypes)];
 					frappe.show_alert({
-						message: __(`Added ${dep_list.length} dependent DocType(s) to backup`),
+						message: __(`Added ${selected_deps.length} dependent DocType(s) to backup`),
 						indicator: 'green'
 					}, 3);
 				}
@@ -495,7 +522,21 @@ class PartialBackupPage {
 			}
 		});
 
+		// Add select all functionality after dialog is shown
 		dep_dialog.show();
+
+		// Setup select all checkbox handler
+		dep_dialog.$wrapper.find('#select-all-deps').on('change', function() {
+			const isChecked = $(this).is(':checked');
+			dep_dialog.$wrapper.find('.dep-checkbox').prop('checked', isChecked);
+		});
+
+		// Update select all checkbox when individual checkboxes change
+		dep_dialog.$wrapper.find('.dep-checkbox').on('change', function() {
+			const totalCheckboxes = dep_dialog.$wrapper.find('.dep-checkbox').length;
+			const checkedCheckboxes = dep_dialog.$wrapper.find('.dep-checkbox:checked').length;
+			dep_dialog.$wrapper.find('#select-all-deps').prop('checked', totalCheckboxes === checkedCheckboxes);
+		});
 	}
 
 	show_backup_options_dialog() {
