@@ -261,6 +261,8 @@ class DocTypeExportPage {
 
 		filtered.forEach(d => {
 			const is_checked = this.selected_doctypes.includes(d.name);
+
+			// Parent DocType
 			const checkbox_html = `
 				<div class="checkbox" style="margin: 5px 0;">
 					<label style="display: flex; align-items: center;">
@@ -278,6 +280,21 @@ class DocTypeExportPage {
 				</div>
 			`;
 			container.append(checkbox_html);
+
+			// Child tables (indented under parent)
+			if (d.has_child_tables && d.child_tables && d.child_tables.length > 0) {
+				d.child_tables.forEach(child => {
+					const child_html = `
+						<div class="child-table-item" style="margin: 3px 0 3px 35px; padding-left: 10px; border-left: 2px solid #d1d8dd;">
+							<span class="text-muted" style="font-size: 0.85em;">
+								<i class="fa fa-table" style="margin-right: 5px;"></i>
+								${child}
+							</span>
+						</div>
+					`;
+					container.append(child_html);
+				});
+			}
 		});
 
 		container.find('.doctype-checkbox').on('change', (e) => {

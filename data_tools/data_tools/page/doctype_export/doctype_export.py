@@ -16,20 +16,31 @@ logger = logging.getLogger(__name__)
 
 @frappe.whitelist()
 def get_all_doctypes():
-	"""Get all DocTypes with their modules for filtering"""
+	"""Get all DocTypes with their modules for filtering, including child tables"""
 	doctypes = frappe.db.sql("""
 		SELECT
 			name,
 			module,
 			COALESCE(custom, 0) as is_custom,
-			COALESCE(issingle, 0) as is_single
+			COALESCE(issingle, 0) as is_single,
+			COALESCE(istable, 0) as is_table
 		FROM `tabDocType`
 		WHERE
 			istable = 0
 		ORDER BY module, name
 	""", as_dict=True)
 
-	return doctypes
+	# Add child tables information for each doctype
+	result = []
+	for dt in doctypes:
+		dt_info = dt.copy()
+		# Get child tables for this doctype
+		child_tables = get_child_tables(dt['name'])
+		dt_info['child_tables'] = child_tables
+		dt_info['has_child_tables'] = len(child_tables) > 0
+		result.append(dt_info)
+
+	return result
 
 
 @frappe.whitelist()
@@ -98,7 +109,8 @@ def get_doctypes_by_app(app_names):
 			name,
 			module,
 			COALESCE(custom, 0) as is_custom,
-			COALESCE(issingle, 0) as is_single
+			COALESCE(issingle, 0) as is_single,
+			COALESCE(istable, 0) as is_table
 		FROM `tabDocType`
 		WHERE
 			istable = 0
@@ -106,7 +118,17 @@ def get_doctypes_by_app(app_names):
 		ORDER BY module, name
 	""", {"modules": all_modules}, as_dict=True)
 
-	return doctypes
+	# Add child tables information for each doctype
+	result = []
+	for dt in doctypes:
+		dt_info = dt.copy()
+		# Get child tables for this doctype
+		child_tables = get_child_tables(dt['name'])
+		dt_info['child_tables'] = child_tables
+		dt_info['has_child_tables'] = len(child_tables) > 0
+		result.append(dt_info)
+
+	return result
 
 
 def get_child_tables(doctype_name):
