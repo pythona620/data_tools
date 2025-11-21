@@ -109,6 +109,29 @@ def get_doctypes_by_app(app_names):
 	return doctypes
 
 
+def get_child_tables(doctype_name):
+	"""Get all child table DocTypes for a given DocType
+
+	Args:
+		doctype_name: Name of the parent DocType
+
+	Returns:
+		list: List of child table DocType names
+	"""
+	try:
+		meta = frappe.get_meta(doctype_name)
+		child_tables = []
+
+		for field in meta.fields:
+			if field.fieldtype == 'Table' and field.options:
+				child_tables.append(field.options)
+
+		return child_tables
+	except Exception as e:
+		logger.warning(f"Error getting child tables for {doctype_name}: {str(e)}")
+		return []
+
+
 @frappe.whitelist()
 def export_doctypes(doctypes):
 	"""Export only DocType schemas (definitions) without data
@@ -136,11 +159,23 @@ def export_doctypes(doctypes):
 		"doctypes": []
 	}
 
+	# Track all doctypes including child tables
+	all_doctypes_with_children = []
+	doctype_child_mapping = {}
+
 	for doctype_name in doctypes:
 		try:
 			# Get DocType definition
 			doctype_doc = frappe.get_doc("DocType", doctype_name)
 			doctype_json = doctype_doc.as_dict()
+
+			# Get child tables for this doctype
+			child_tables = get_child_tables(doctype_name)
+			doctype_child_mapping[doctype_name] = child_tables
+
+			# Add to all doctypes list
+			all_doctypes_with_children.append(doctype_name)
+			all_doctypes_with_children.extend(child_tables)
 
 			# Add to export data (schema only, no records)
 			export_data["doctypes"].append({
@@ -148,12 +183,62 @@ def export_doctypes(doctypes):
 				"definition": doctype_json,
 				"module": doctype_doc.module,
 				"is_custom": doctype_doc.custom,
-				"is_single": doctype_doc.issingle
+				"is_single": doctype_doc.issingle,
+				"child_tables": child_tables
 			})
+
+			# Also export child table definitions
+			for child_table in child_tables:
+				try:
+					child_doc = frappe.get_doc("DocType", child_table)
+					child_json = child_doc.as_dict()
+
+					export_data["doctypes"].append({
+						"doctype": child_table,
+						"definition": child_json,
+						"module": child_doc.module,
+						"is_custom": child_doc.custom,
+						"is_single": child_doc.issingle,
+						"parent_doctype": doctype_name,
+						"is_child_table": True
+					})
+				except Exception as e:
+					frappe.log_error(f"Error exporting child table {child_table}: {str(e)}")
 
 		except Exception as e:
 			frappe.log_error(f"Error exporting {doctype_name}: {str(e)}")
 			# Continue with other doctypes
+
+	# Create exported_data.txt content
+	exported_data_lines = []
+	exported_data_lines.append("=" * 80)
+	exported_data_lines.append("DOCTYPE EXPORT SUMMARY")
+	exported_data_lines.append("=" * 80)
+	exported_data_lines.append(f"Export Date: {frappe.utils.now()}")
+	exported_data_lines.append(f"Exported By: {frappe.session.user}")
+	exported_data_lines.append(f"Total Selected DocTypes: {len(doctypes)}")
+	exported_data_lines.append(f"Total DocTypes (including child tables): {len(export_data['doctypes'])}")
+	exported_data_lines.append("=" * 80)
+	exported_data_lines.append("")
+
+	for doctype_name in doctypes:
+		child_tables = doctype_child_mapping.get(doctype_name, [])
+		exported_data_lines.append(f"\nDocType: {doctype_name}")
+		exported_data_lines.append("-" * 80)
+
+		if child_tables:
+			exported_data_lines.append(f"  Child Tables ({len(child_tables)}):")
+			for child in child_tables:
+				exported_data_lines.append(f"    - {child}")
+		else:
+			exported_data_lines.append("  Child Tables: None")
+		exported_data_lines.append("")
+
+	exported_data_lines.append("=" * 80)
+	exported_data_lines.append("END OF EXPORT SUMMARY")
+	exported_data_lines.append("=" * 80)
+
+	exported_data_txt = "\n".join(exported_data_lines)
 
 	# Create ZIP file
 	zip_buffer = BytesIO()
@@ -161,6 +246,9 @@ def export_doctypes(doctypes):
 		# Add JSON data to ZIP
 		json_data = json.dumps(export_data, indent=2, default=str)
 		zip_file.writestr('doctype_schemas.json', json_data)
+
+		# Add exported_data.txt to ZIP
+		zip_file.writestr('exported_data.txt', exported_data_txt)
 
 		# Add metadata file for preview
 		metadata = {
@@ -181,5 +269,6 @@ def export_doctypes(doctypes):
 		"success": True,
 		"file_data": file_data,
 		"filename": f"doctype_export_{frappe.utils.now_datetime().strftime('%Y%m%d_%H%M%S')}.zip",
-		"total_doctypes": len(export_data["doctypes"])
+		"total_doctypes": len(export_data["doctypes"]),
+		"exported_data_summary": exported_data_txt
 	}
