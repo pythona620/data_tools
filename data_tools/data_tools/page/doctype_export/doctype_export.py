@@ -14,6 +14,29 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def get_child_tables(doctype_name):
+	"""Get all child table DocTypes for a given DocType
+
+	Args:
+		doctype_name: Name of the parent DocType
+
+	Returns:
+		list: List of child table DocType names
+	"""
+	try:
+		meta = frappe.get_meta(doctype_name)
+		child_tables = []
+
+		for field in meta.fields:
+			if field.fieldtype == 'Table' and field.options:
+				child_tables.append(field.options)
+
+		return child_tables
+	except Exception as e:
+		logger.warning(f"Error getting child tables for {doctype_name}: {str(e)}")
+		return []
+
+
 @frappe.whitelist()
 def get_all_doctypes():
 	"""Get all DocTypes with their modules for filtering, including child tables"""
@@ -129,29 +152,6 @@ def get_doctypes_by_app(app_names):
 		result.append(dt_info)
 
 	return result
-
-
-def get_child_tables(doctype_name):
-	"""Get all child table DocTypes for a given DocType
-
-	Args:
-		doctype_name: Name of the parent DocType
-
-	Returns:
-		list: List of child table DocType names
-	"""
-	try:
-		meta = frappe.get_meta(doctype_name)
-		child_tables = []
-
-		for field in meta.fields:
-			if field.fieldtype == 'Table' and field.options:
-				child_tables.append(field.options)
-
-		return child_tables
-	except Exception as e:
-		logger.warning(f"Error getting child tables for {doctype_name}: {str(e)}")
-		return []
 
 
 @frappe.whitelist()

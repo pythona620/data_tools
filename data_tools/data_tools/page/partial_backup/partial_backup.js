@@ -15,6 +15,9 @@ class PartialBackupPage {
 		this.selected_doctypes = [];
 		this.export_format = 'json'; // Default format
 		this.include_files = false; // Include file attachments
+		this.field_transformations = []; // Field transformations
+		this.selected_apps = []; // Selected apps for filtering
+		this.selected_modules = []; // Selected modules for filtering
 		this.job_id = null; // Track background job
 		this.make_page();
 	}
@@ -80,6 +83,24 @@ class PartialBackupPage {
 							<p class="help-box small text-muted">Export all file attachments associated with the selected DocTypes</p>
 						</div>
 						<div class="form-group">
+							<label>
+								<input type="checkbox" id="enable-transformations-checkbox" style="margin-right: 8px;">
+								Enable Field Value Transformations
+							</label>
+							<p class="help-box small text-muted">Transform field values during backup (e.g., change Company from "Test" to "Production")</p>
+						</div>
+						<div id="transformations-section" style="display: none; border: 1px solid #d1d8dd; padding: 15px; border-radius: 4px; background: #f9f9f9; margin-top: 10px;">
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+								<strong>Field Transformations</strong>
+								<button class="btn btn-xs btn-success" id="add-transformation-btn">
+									<span class="fa fa-plus"></span> Add Transformation
+								</button>
+							</div>
+							<div id="transformations-list" style="max-height: 300px; overflow-y: auto;">
+								<p class="text-muted small">No transformations added yet. Click "Add Transformation" to begin.</p>
+							</div>
+						</div>
+						<div class="form-group" style="margin-top: 15px;">
 							<button class="btn btn-primary btn-sm" id="create-backup-btn">
 								<span class="fa fa-download"></span> Create Backup
 							</button>
@@ -155,39 +176,51 @@ class PartialBackupPage {
 		}
 	}
 
+	load_doctypes_with_filters(app_filter = null, module_filter = null) {
+		// Determine which method to call based on app_filter
+		const method = app_filter
+			? 'data_tools.data_tools.page.partial_backup.partial_backup.get_doctypes_by_app'
+			: 'data_tools.data_tools.page.partial_backup.partial_backup.get_all_doctypes';
+
+		const args = app_filter
+			? { app_names: Array.isArray(app_filter) ? JSON.stringify(app_filter) : app_filter }
+			: {};
+
+		frappe.call({
+			method: method,
+			args: args,
+			callback: (r) => {
+				if (r.message) {
+					this.doctypes = r.message;
+
+					// Apply module filter if specified (multiple modules)
+					if (module_filter && Array.isArray(module_filter) && module_filter.length > 0) {
+						this.filtered_doctypes = this.doctypes.filter(d => module_filter.includes(d.module));
+					} else {
+						this.filtered_doctypes = this.doctypes;
+					}
+
+					console.log('Total doctypes:', this.doctypes.length);
+					console.log('Filtered doctypes:', this.filtered_doctypes.length);
+
+					this.setup_doctype_list();
+				}
+			}
+		});
+	}
+
 	setup_app_filter(apps) {
 		const container = this.page.main.find('#app-filter');
 
-		// Create a wrapper div for better control
+		// Create wrapper for multi-select
 		const wrapper = $('<div class="multiselect-wrapper"></div>');
 		container.append(wrapper);
 
-		// Use Frappe's MultiSelectList for better handling
-		this.app_filter = frappe.ui.form.make_control({
-			parent: wrapper,
-			df: {
-				fieldtype: 'MultiSelectList',
-				fieldname: 'app',
-				options: apps,
-				placeholder: 'Select Apps (Leave empty for all)',
-				onchange: () => {
-					this.handle_app_filter_change();
-				}
-			},
-			render_input: true
-		});
-
-		// If MultiSelectList doesn't work, fallback to manual implementation
-		if (!this.app_filter || !this.app_filter.$wrapper) {
-			wrapper.empty();
-			this.create_manual_multiselect(wrapper, apps);
-		}
+		// Create manual multi-select for apps (consistent with module filter)
+		this.create_app_multiselect(wrapper, apps);
 	}
 
-	create_manual_multiselect(container, apps) {
-		// Manual multi-select implementation using checkboxes
-		this.selected_apps = [];
-
+	create_app_multiselect(container, apps) {
 		const html = `
 			<div class="app-multiselect">
 				<div class="form-control multiselect-input" style="height: auto; min-height: 38px; cursor: pointer;" id="app-multiselect-trigger">
@@ -226,7 +259,7 @@ class PartialBackupPage {
 				this.selected_apps = this.selected_apps.filter(a => a !== app);
 			}
 
-			this.update_multiselect_display(container);
+			this.update_app_multiselect_display(container);
 			this.handle_app_filter_change();
 		});
 
@@ -238,7 +271,7 @@ class PartialBackupPage {
 		});
 	}
 
-	update_multiselect_display(container) {
+	update_app_multiselect_display(container) {
 		const trigger = container.find('#app-multiselect-trigger');
 		if (this.selected_apps.length === 0) {
 			trigger.html('<span class="text-muted">Select Apps (click to open)</span>');
@@ -251,68 +284,105 @@ class PartialBackupPage {
 	}
 
 	handle_app_filter_change() {
-		let selected_apps;
-
-		// Check if using Frappe control or manual implementation
-		if (this.app_filter && typeof this.app_filter.get_value === 'function') {
-			selected_apps = this.app_filter.get_value();
-
-			// Handle different return formats from Frappe control
-			if (typeof selected_apps === 'string') {
-				selected_apps = selected_apps ? selected_apps.split(',').map(s => s.trim()).filter(s => s) : [];
-			} else if (!Array.isArray(selected_apps)) {
-				selected_apps = [];
-			}
-		} else {
-			// Use manual selection
-			selected_apps = this.selected_apps || [];
-		}
+		// Use manual selection array
+		const selected_apps = this.selected_apps || [];
 
 		console.log('Selected apps:', selected_apps);
 
 		// If no apps selected, pass null to load all
 		const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
-		const module = this.module_filter ? this.module_filter.get_value() : null;
-		const module_filter = module === 'All Modules' ? null : module;
-		this.load_doctypes(app_filter, module_filter);
+		const module_filter = this.selected_modules && this.selected_modules.length > 0 ? this.selected_modules : null;
+
+		this.load_doctypes_with_filters(app_filter, module_filter);
 	}
 
 	setup_module_filter(modules) {
 		const container = this.page.main.find('#module-filter');
 
-		this.module_filter = frappe.ui.form.make_control({
-			parent: container,
-			df: {
-				fieldtype: 'Select',
-				fieldname: 'module',
-				options: ['All Modules', ...modules],
-				default: 'All Modules',
-				onchange: () => {
-					const selected_module = this.module_filter.get_value();
-					const module = selected_module === 'All Modules' ? null : selected_module;
+		// Create wrapper for multi-select
+		const wrapper = $('<div class="multiselect-wrapper"></div>');
+		container.append(wrapper);
 
-					let selected_apps;
-					// Check if using Frappe control or manual implementation
-					if (this.app_filter && typeof this.app_filter.get_value === 'function') {
-						selected_apps = this.app_filter.get_value();
-						// Handle different return formats
-						if (typeof selected_apps === 'string') {
-							selected_apps = selected_apps ? selected_apps.split(',').map(s => s.trim()).filter(s => s) : [];
-						} else if (!Array.isArray(selected_apps)) {
-							selected_apps = [];
-						}
-					} else {
-						// Use manual selection
-						selected_apps = this.selected_apps || [];
-					}
+		// Create manual multi-select for modules
+		this.create_module_multiselect(wrapper, modules);
+	}
 
-					// If no apps selected or empty array, pass null to load all
-					const app_filter = selected_apps && selected_apps.length > 0 ? selected_apps : null;
-					this.load_doctypes(app_filter, module);
-				}
-			},
-			render_input: true
+	create_module_multiselect(container, modules) {
+		const html = `
+			<div class="module-multiselect">
+				<div class="form-control multiselect-input" style="height: auto; min-height: 38px; cursor: pointer;" id="module-multiselect-trigger">
+					<span class="text-muted">Select Modules (click to open)</span>
+				</div>
+				<div class="multiselect-dropdown" id="module-multiselect-dropdown" style="display: none; position: absolute; z-index: 1000; background: white; border: 1px solid #d1d8dd; border-radius: 4px; max-height: 300px; overflow-y: auto; width: 100%; margin-top: 2px;">
+					${modules.map(module => `
+						<div class="checkbox" style="padding: 5px 10px; margin: 0;">
+							<label style="font-weight: normal; margin: 0;">
+								<input type="checkbox" class="module-checkbox" value="${module}">
+								${module}
+							</label>
+						</div>
+					`).join('')}
+				</div>
+			</div>
+		`;
+
+		container.html(html);
+
+		// Handle dropdown toggle
+		container.find('#module-multiselect-trigger').on('click', () => {
+			container.find('#module-multiselect-dropdown').toggle();
 		});
+
+		// Handle checkbox changes
+		container.find('.module-checkbox').on('change', (e) => {
+			const checkbox = $(e.target);
+			const module = checkbox.val();
+
+			if (checkbox.is(':checked')) {
+				if (!this.selected_modules.includes(module)) {
+					this.selected_modules.push(module);
+				}
+			} else {
+				this.selected_modules = this.selected_modules.filter(m => m !== module);
+			}
+
+			this.update_module_multiselect_display(container);
+			this.handle_module_filter_change();
+		});
+
+		// Close dropdown when clicking outside
+		$(document).on('click', (e) => {
+			if (!$(e.target).closest('.module-multiselect').length) {
+				container.find('#module-multiselect-dropdown').hide();
+			}
+		});
+	}
+
+	update_module_multiselect_display(container) {
+		const trigger = container.find('#module-multiselect-trigger');
+		if (this.selected_modules.length === 0) {
+			trigger.html('<span class="text-muted">Select Modules (click to open)</span>');
+		} else {
+			const pills = this.selected_modules.map(module =>
+				`<span class="badge" style="margin: 2px; background-color: #2490ef; color: white;">${module}</span>`
+			).join('');
+			trigger.html(pills);
+		}
+	}
+
+	handle_module_filter_change() {
+		// Get selected apps and modules
+		const selected_apps = this.selected_apps || [];
+		const selected_modules = this.selected_modules || [];
+
+		console.log('Selected apps:', selected_apps);
+		console.log('Selected modules:', selected_modules);
+
+		// If no apps selected, pass null to load all
+		const app_filter = selected_apps.length > 0 ? selected_apps : null;
+		const module_filter = selected_modules.length > 0 ? selected_modules : null;
+
+		this.load_doctypes_with_filters(app_filter, module_filter);
 	}
 
 	setup_export_format() {
@@ -414,6 +484,133 @@ class PartialBackupPage {
 
 		this.page.main.find('#include-files-checkbox').on('change', (e) => {
 			this.include_files = e.target.checked;
+		});
+
+		this.page.main.find('#enable-transformations-checkbox').on('change', (e) => {
+			if (e.target.checked) {
+				this.page.main.find('#transformations-section').slideDown();
+			} else {
+				this.page.main.find('#transformations-section').slideUp();
+			}
+		});
+
+		this.page.main.find('#add-transformation-btn').on('click', () => {
+			this.show_add_transformation_dialog();
+		});
+	}
+
+	show_add_transformation_dialog() {
+		const dialog = new frappe.ui.Dialog({
+			title: __('Add Field Transformation'),
+			fields: [
+				{
+					fieldname: 'doctype',
+					fieldtype: 'Select',
+					label: __('DocType'),
+					reqd: 1,
+					options: this.selected_doctypes,
+					description: __('Select the DocType to transform'),
+					onchange: function() {
+						const selected_doctype = this.get_value();
+						if (selected_doctype) {
+							// Load fields for the selected doctype
+							frappe.call({
+								method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_doctype_fields',
+								args: {
+									doctype: selected_doctype
+								},
+								callback: (r) => {
+									if (r.message) {
+										const field_options = r.message.map(f => ({
+											label: `${f.label} (${f.fieldname})`,
+											value: f.fieldname
+										}));
+
+										// Update field dropdown
+										const field_control = dialog.get_field('field');
+										field_control.df.options = field_options;
+										field_control.refresh();
+										field_control.set_value('');
+									}
+								}
+							});
+						}
+					}
+				},
+				{
+					fieldname: 'field',
+					fieldtype: 'Select',
+					label: __('Field Name'),
+					reqd: 1,
+					options: [],
+					description: __('Select the field to transform')
+				},
+				{
+					fieldname: 'old_value',
+					fieldtype: 'Data',
+					label: __('Old Value'),
+					description: __('Leave empty to replace all values in this field')
+				},
+				{
+					fieldname: 'new_value',
+					fieldtype: 'Data',
+					label: __('New Value'),
+					reqd: 1,
+					description: __('The new value to set')
+				}
+			],
+			primary_action_label: __('Add'),
+			primary_action: (values) => {
+				this.add_transformation(values);
+				dialog.hide();
+			}
+		});
+
+		dialog.show();
+	}
+
+	add_transformation(transformation) {
+		this.field_transformations.push(transformation);
+		this.render_transformations();
+	}
+
+	remove_transformation(index) {
+		this.field_transformations.splice(index, 1);
+		this.render_transformations();
+	}
+
+	render_transformations() {
+		const container = this.page.main.find('#transformations-list');
+		container.empty();
+
+		if (this.field_transformations.length === 0) {
+			container.html('<p class="text-muted small">No transformations added yet. Click "Add Transformation" to begin.</p>');
+			return;
+		}
+
+		this.field_transformations.forEach((transform, index) => {
+			const old_val_display = transform.old_value || '<span class="text-muted">(all values)</span>';
+			const html = `
+				<div class="transformation-item" style="padding: 10px; margin-bottom: 8px; background: white; border: 1px solid #d1d8dd; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
+					<div>
+						<strong>${transform.doctype}</strong>.<code>${transform.field}</code>
+						<br>
+						<small class="text-muted">
+							${old_val_display} → <strong>${transform.new_value}</strong>
+						</small>
+					</div>
+					<button class="btn btn-xs btn-danger remove-transformation-btn" data-index="${index}">
+						<span class="fa fa-times"></span> Remove
+					</button>
+				</div>
+			`;
+			container.append(html);
+		});
+
+		// Add remove handlers
+		container.find('.remove-transformation-btn').on('click', (e) => {
+			const index = parseInt($(e.currentTarget).data('index'));
+			this.remove_transformation(index);
 		});
 	}
 
@@ -578,13 +775,22 @@ class PartialBackupPage {
 		const status_elem = this.page.main.find('#backup-status');
 		status_elem.html('<span class="text-primary"><span class="fa fa-spinner fa-spin"></span> Starting backup job...</span>');
 
+		// Prepare field transformations
+		const transformations = this.field_transformations.length > 0
+			? JSON.stringify(this.field_transformations)
+			: null;
+
+		console.log('Field transformations:', this.field_transformations);
+		console.log('Transformations JSON:', transformations);
+
 		// Start background job
 		frappe.call({
 			method: 'data_tools.data_tools.page.partial_backup.partial_backup.start_backup_job',
 			args: {
 				doctypes: this.selected_doctypes,
 				export_format: this.export_format,
-				include_files: this.include_files
+				include_files: this.include_files,
+				field_transformations: transformations
 			},
 			callback: (r) => {
 				if (r.message && r.message.job_id) {
@@ -687,47 +893,80 @@ class PartialBackupPage {
 					const result = r.message;
 					console.log('Result:', result);
 					console.log('Filename:', result.filename);
-					console.log('File data length:', result.file_data ? result.file_data.length : 0);
+					console.log('Use URL:', result.use_url);
+					console.log('File size:', result.file_size);
 
 					try {
-						// Download the file
-						const binary_data = atob(result.file_data);
-						const array = new Uint8Array(binary_data.length);
-						for (let i = 0; i < binary_data.length; i++) {
-							array[i] = binary_data.charCodeAt(i);
+						// Check if we should use URL-based download (for large files)
+						if (result.use_url) {
+							console.log('Using URL-based download for large file');
+							console.log('Download URL:', result.download_url);
+
+							// For large files, use direct URL download
+							const a = document.createElement('a');
+							a.href = result.download_url;
+							a.download = result.filename;
+							a.style.display = 'none';
+							document.body.appendChild(a);
+							a.click();
+							document.body.removeChild(a);
+
+							status_elem.html(
+								`<span class="text-success">
+									<span class="fa fa-check"></span>
+									Backup download started: ${result.total_doctypes} DocTypes, ${result.total_records} records
+									${result.total_files ? `, ${result.total_files} files` : ''}
+									(${(result.file_size / 1024 / 1024).toFixed(2)} MB)
+								</span>`
+							);
+
+							frappe.show_alert({
+								message: __('Large backup download started'),
+								indicator: 'green'
+							}, 5);
+						} else {
+							console.log('Using base64 download for small file');
+							console.log('File data length:', result.file_data ? result.file_data.length : 0);
+
+							// For small files, use base64 decoding
+							const binary_data = atob(result.file_data);
+							const array = new Uint8Array(binary_data.length);
+							for (let i = 0; i < binary_data.length; i++) {
+								array[i] = binary_data.charCodeAt(i);
+							}
+
+							console.log('Binary data length:', binary_data.length);
+
+							// Set correct MIME type based on export format
+							const mime_type = this.export_format === 'sql'
+								? 'application/sql'
+								: 'application/zip';
+							const blob = new Blob([array], { type: mime_type });
+							console.log('Blob created, size:', blob.size);
+
+							const url = window.URL.createObjectURL(blob);
+							const a = document.createElement('a');
+							a.href = url;
+							a.download = result.filename;
+							document.body.appendChild(a);
+							a.click();
+							console.log('Download triggered');
+							document.body.removeChild(a);
+							window.URL.revokeObjectURL(url);
+
+							status_elem.html(
+								`<span class="text-success">
+									<span class="fa fa-check"></span>
+									Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
+									${result.total_files ? `, ${result.total_files} files` : ''}
+								</span>`
+							);
+
+							frappe.show_alert({
+								message: __('Backup downloaded successfully'),
+								indicator: 'green'
+							});
 						}
-
-						console.log('Binary data length:', binary_data.length);
-
-						// Set correct MIME type based on export format
-						const mime_type = this.export_format === 'sql'
-							? 'application/sql'
-							: 'application/zip';
-						const blob = new Blob([array], { type: mime_type });
-						console.log('Blob created, size:', blob.size);
-
-						const url = window.URL.createObjectURL(blob);
-						const a = document.createElement('a');
-						a.href = url;
-						a.download = result.filename;
-						document.body.appendChild(a);
-						a.click();
-						console.log('Download triggered');
-						document.body.removeChild(a);
-						window.URL.revokeObjectURL(url);
-
-						status_elem.html(
-							`<span class="text-success">
-								<span class="fa fa-check"></span>
-								Backup downloaded: ${result.total_doctypes} DocTypes, ${result.total_records} records
-								${result.total_files ? `, ${result.total_files} files` : ''}
-							</span>`
-						);
-
-						frappe.show_alert({
-							message: __('Backup downloaded successfully'),
-							indicator: 'green'
-						});
 					} catch (e) {
 						console.error('Error processing download:', e);
 						status_elem.html('<span class="text-danger">Error processing download: ' + e.message + '</span>');
