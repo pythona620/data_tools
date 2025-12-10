@@ -63,6 +63,48 @@ def get_apps():
 
 
 @frappe.whitelist()
+def get_doctype_fields(doctype):
+	"""Get all fields for a specific DocType
+
+	Args:
+		doctype: Name of the DocType
+
+	Returns:
+		list: List of field names with their labels
+	"""
+	try:
+		meta = frappe.get_meta(doctype)
+		fields = []
+
+		# Add standard fields
+		standard_fields = [
+			{'fieldname': 'name', 'label': 'ID/Name'},
+			{'fieldname': 'owner', 'label': 'Owner'},
+			{'fieldname': 'creation', 'label': 'Creation'},
+			{'fieldname': 'modified', 'label': 'Modified'},
+			{'fieldname': 'modified_by', 'label': 'Modified By'},
+			{'fieldname': 'docstatus', 'label': 'Document Status'}
+		]
+
+		# Add custom fields from DocType
+		for field in meta.fields:
+			if field.fieldtype not in ['Table', 'Section Break', 'Column Break', 'Tab Break', 'HTML', 'Button']:
+				fields.append({
+					'fieldname': field.fieldname,
+					'label': field.label or field.fieldname,
+					'fieldtype': field.fieldtype
+				})
+
+		# Combine and return
+		all_fields = standard_fields + fields
+		return all_fields
+
+	except Exception as e:
+		frappe.log_error(f"Error getting fields for {doctype}: {str(e)}")
+		return []
+
+
+@frappe.whitelist()
 def get_doctypes_by_app(app_names):
 	"""Get all DocTypes belonging to specific app(s)
 
@@ -197,13 +239,15 @@ def sort_doctypes_by_dependencies(doctypes):
 
 
 @frappe.whitelist()
-def create_partial_backup(doctypes, export_format='json', include_files=False):
+def create_partial_backup(doctypes, export_format='json', include_files=False, field_transformations=None):
 	"""Create a partial backup of selected DocTypes
 
 	Args:
 		doctypes: List of DocType names to backup
 		export_format: 'json' or 'sql' (default: 'json')
 		include_files: Boolean to include file attachments (default: False)
+		field_transformations: Optional list of field transformation rules (JSON string or list)
+			Format: [{"doctype": "Employee", "field": "company", "old_value": "Test", "new_value": "caratred"}]
 	"""
 	if isinstance(doctypes, str):
 		doctypes = json.loads(doctypes)
@@ -215,20 +259,28 @@ def create_partial_backup(doctypes, export_format='json', include_files=False):
 	if isinstance(include_files, str):
 		include_files = include_files.lower() in ['true', '1', 'yes']
 
+	# Parse field_transformations if it's a JSON string
+	if isinstance(field_transformations, str):
+		try:
+			field_transformations = json.loads(field_transformations)
+		except (json.JSONDecodeError, ValueError):
+			field_transformations = None
+
 	if export_format == 'sql':
-		return create_sql_backup(doctypes, include_files)
+		return create_sql_backup(doctypes, include_files, None, field_transformations)
 	else:
-		return create_json_backup(doctypes, include_files)
+		return create_json_backup(doctypes, include_files, None, field_transformations)
 
 
 @frappe.whitelist()
-def start_backup_job(doctypes, export_format='json', include_files=False):
+def start_backup_job(doctypes, export_format='json', include_files=False, field_transformations=None):
 	"""Start a background job for backup creation
 
 	Args:
 		doctypes: List of DocType names to backup
 		export_format: 'json' or 'sql' (default: 'json')
 		include_files: Boolean to include file attachments (default: False)
+		field_transformations: Optional list of field transformation rules (JSON string or list)
 
 	Returns:
 		dict: Contains job_id for tracking
@@ -243,6 +295,13 @@ def start_backup_job(doctypes, export_format='json', include_files=False):
 	if isinstance(include_files, str):
 		include_files = include_files.lower() in ['true', '1', 'yes']
 
+	# Parse field_transformations if it's a JSON string
+	if isinstance(field_transformations, str):
+		try:
+			field_transformations = json.loads(field_transformations)
+		except (json.JSONDecodeError, ValueError):
+			field_transformations = None
+
 	# Generate unique job ID
 	job_id = str(uuid.uuid4())
 
@@ -253,6 +312,7 @@ def start_backup_job(doctypes, export_format='json', include_files=False):
 		'doctypes': doctypes,
 		'export_format': export_format,
 		'include_files': include_files,
+		'field_transformations': field_transformations,
 		'created_by': frappe.session.user,
 		'created_at': frappe.utils.now()
 	}
@@ -266,7 +326,8 @@ def start_backup_job(doctypes, export_format='json', include_files=False):
 		backup_job_id=job_id,
 		doctypes=doctypes,
 		export_format=export_format,
-		include_files=include_files
+		include_files=include_files,
+		field_transformations=field_transformations
 	)
 
 	return {
@@ -275,7 +336,7 @@ def start_backup_job(doctypes, export_format='json', include_files=False):
 	}
 
 
-def execute_backup_job(backup_job_id, doctypes, export_format='json', include_files=False):
+def execute_backup_job(backup_job_id, doctypes, export_format='json', include_files=False, field_transformations=None):
 	"""Execute the backup job in background
 
 	Args:
@@ -283,6 +344,7 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		doctypes: List of DocType names to backup
 		export_format: 'json' or 'sql'
 		include_files: Boolean to include file attachments
+		field_transformations: Optional list of field transformation rules
 	"""
 	try:
 		# Get job data to retrieve user
@@ -299,9 +361,9 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 
 		# Create backup
 		if export_format == 'sql':
-			result = create_sql_backup(doctypes, include_files, backup_job_id)
+			result = create_sql_backup(doctypes, include_files, backup_job_id, field_transformations)
 		else:
-			result = create_json_backup(doctypes, include_files, backup_job_id)
+			result = create_json_backup(doctypes, include_files, backup_job_id, field_transformations)
 
 		# Save backup file to temp location
 		backup_dir = frappe.get_site_path('private', 'files', 'partial_backups')
@@ -393,7 +455,7 @@ def download_backup(job_id):
 		job_id: Unique job identifier
 
 	Returns:
-		dict: File data for download
+		dict: File URL for download or file data for small files
 	"""
 	try:
 		logger.info(f"Download request for job {job_id}")
@@ -422,28 +484,62 @@ def download_backup(job_id):
 			logger.error(f"Job {job_id} file does not exist at {file_path}")
 			frappe.throw(_("Backup file not found at expected location"))
 
-		# Read file and encode
-		with open(file_path, 'rb') as f:
-			file_content = f.read()
+		# Get file size
+		file_size = os.path.getsize(file_path)
+		logger.info(f"Job {job_id} file size: {file_size} bytes ({file_size / 1024 / 1024:.2f} MB)")
 
-		file_data = base64.b64encode(file_content).decode()
-		logger.info(f"Job {job_id} file read successfully, size: {len(file_content)} bytes")
+		# For large files (>10MB), use direct file serving instead of base64
+		if file_size > 10 * 1024 * 1024:  # 10 MB
+			logger.info(f"Large file detected, using direct download method")
 
-		# Clean up the file after download
-		try:
-			os.remove(file_path)
-			logger.info(f"Job {job_id} file cleaned up")
-		except Exception as e:
-			logger.warning(f"Error removing file {file_path}: {str(e)}")
+			# Move file to private/files for download
+			filename = job_info.get('filename')
+			download_folder = frappe.get_site_path('private', 'files', 'downloads')
+			os.makedirs(download_folder, exist_ok=True)
 
-		return {
-			'success': True,
-			'file_data': file_data,
-			'filename': job_info.get('filename'),
-			'total_doctypes': job_info.get('total_doctypes'),
-			'total_records': job_info.get('total_records'),
-			'total_files': job_info.get('total_files', 0)
-		}
+			download_path = os.path.join(download_folder, filename)
+
+			# Move the file
+			shutil.move(file_path, download_path)
+			logger.info(f"Moved file to {download_path}")
+
+			# Return download URL
+			return {
+				'success': True,
+				'use_url': True,
+				'download_url': f'/api/method/data_tools.data_tools.page.partial_backup.partial_backup.serve_backup_file?filename={filename}',
+				'filename': filename,
+				'total_doctypes': job_info.get('total_doctypes'),
+				'total_records': job_info.get('total_records'),
+				'total_files': job_info.get('total_files', 0),
+				'file_size': file_size
+			}
+		else:
+			# For small files, use the old method (base64 encoding)
+			logger.info(f"Small file, using base64 encoding")
+			with open(file_path, 'rb') as f:
+				file_content = f.read()
+
+			file_data = base64.b64encode(file_content).decode()
+			logger.info(f"Job {job_id} file read successfully, size: {len(file_content)} bytes")
+
+			# Clean up the file after download
+			try:
+				os.remove(file_path)
+				logger.info(f"Job {job_id} file cleaned up")
+			except Exception as e:
+				logger.warning(f"Error removing file {file_path}: {str(e)}")
+
+			return {
+				'success': True,
+				'use_url': False,
+				'file_data': file_data,
+				'filename': job_info.get('filename'),
+				'total_doctypes': job_info.get('total_doctypes'),
+				'total_records': job_info.get('total_records'),
+				'total_files': job_info.get('total_files', 0),
+				'file_size': file_size
+			}
 
 	except Exception as e:
 		logger.error(f"Error downloading backup {job_id}: {str(e)}")
@@ -451,13 +547,122 @@ def download_backup(job_id):
 		raise
 
 
-def create_json_backup(doctypes, include_files=False, job_id=None):
+@frappe.whitelist()
+def serve_backup_file(filename):
+	"""Serve a backup file for download
+
+	Args:
+		filename: Name of the backup file to serve
+	"""
+	try:
+		download_folder = frappe.get_site_path('private', 'files', 'downloads')
+		file_path = os.path.join(download_folder, filename)
+
+		if not os.path.exists(file_path):
+			frappe.throw(_("Backup file not found"))
+
+		# Serve the file
+		frappe.local.response.filename = filename
+		frappe.local.response.filecontent = open(file_path, 'rb').read()
+		frappe.local.response.type = "download"
+
+		# Clean up after serving
+		try:
+			os.remove(file_path)
+			logger.info(f"Cleaned up downloaded file: {filename}")
+		except Exception as e:
+			logger.warning(f"Error removing file {file_path}: {str(e)}")
+
+	except Exception as e:
+		logger.error(f"Error serving backup file {filename}: {str(e)}")
+		frappe.throw(_("Error downloading file"))
+
+
+def apply_field_transformations(records, doctype_name, transformations):
+	"""Apply field value transformations to records
+
+	Args:
+		records: List of record dictionaries
+		doctype_name: Name of the DocType being processed
+		transformations: List of transformation rules
+			Format: [
+				{
+					"doctype": "Employee",
+					"field": "company",
+					"old_value": "Test",
+					"new_value": "caratred"
+				}
+			]
+
+	Returns:
+		list: Records with transformations applied
+	"""
+	if not transformations or not records:
+		return records
+
+	# Filter transformations for this doctype
+	doctype_transformations = [
+		t for t in transformations
+		if t.get('doctype', '').lower() == doctype_name.lower()
+	]
+
+	if not doctype_transformations:
+		return records
+
+	logger.info(f"Applying {len(doctype_transformations)} transformation(s) to {doctype_name}")
+	logger.info(f"Transformations: {doctype_transformations}")
+	logger.info(f"Number of records: {len(records)}")
+
+	# Log first record's keys for debugging
+	if records:
+		logger.info(f"Sample record keys: {list(records[0].keys())}")
+
+	# Apply transformations to each record
+	for record in records:
+		for transform in doctype_transformations:
+			field_name = transform.get('field')
+			old_value = transform.get('old_value')
+			new_value = transform.get('new_value')
+
+			if not field_name:
+				continue
+
+			# Find the actual field name (case-insensitive match)
+			actual_field_name = None
+			for key in record.keys():
+				if key.lower() == field_name.lower():
+					actual_field_name = key
+					break
+
+			# Check if field exists in record
+			if actual_field_name:
+				current_value = record[actual_field_name]
+
+				# Apply transformation if value matches
+				# Treat None or empty string as "replace all values"
+				should_replace = (
+					old_value is None or
+					old_value == '' or
+					str(current_value) == str(old_value)
+				)
+
+				if should_replace:
+					record[actual_field_name] = new_value
+					logger.info(f"Transformed {doctype_name}.{actual_field_name}: '{current_value}' → '{new_value}'")
+			else:
+				logger.warning(f"Field '{field_name}' not found in {doctype_name} record. Available fields: {list(record.keys())}")
+
+	return records
+
+
+def create_json_backup(doctypes, include_files=False, job_id=None, field_transformations=None):
 	"""Create JSON backup of selected DocTypes
 
 	Args:
 		doctypes: List of DocType names to backup
 		include_files: Boolean to include file attachments
 		job_id: Optional job ID for progress tracking
+		field_transformations: Optional list of field transformation rules
 	"""
 	backup_data = {
 		"backup_info": {
@@ -500,6 +705,10 @@ def create_json_backup(doctypes, include_files=False, job_id=None):
 						records.append(doc.as_dict())
 					except Exception as e:
 						frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
+
+			# Apply field transformations if specified
+			if field_transformations:
+				records = apply_field_transformations(records, doctype_name, field_transformations)
 
 			# Collect file attachments if requested
 			doctype_files = []
@@ -600,13 +809,14 @@ def create_json_backup(doctypes, include_files=False, job_id=None):
 	}
 
 
-def create_sql_backup(doctypes, include_files=False, job_id=None):
+def create_sql_backup(doctypes, include_files=False, job_id=None, field_transformations=None):
 	"""Create SQL backup of selected DocTypes
 
 	Args:
 		doctypes: List of DocType names to backup
 		include_files: Boolean to include file attachments
 		job_id: Optional job ID for progress tracking
+		field_transformations: Optional list of field transformation rules
 	"""
 	sql_statements = []
 	total_records = 0
@@ -663,6 +873,10 @@ SET FOREIGN_KEY_CHECKS=0;
 						as_list=False
 					)
 					if records:
+						# Apply field transformations if specified
+						if field_transformations:
+							records = apply_field_transformations(records, doctype_name, field_transformations)
+
 						records_count = len(records)
 						insert_sql = generate_insert_statements(table_name, records)
 						sql_statements.extend(insert_sql)
@@ -674,6 +888,10 @@ SET FOREIGN_KEY_CHECKS=0;
 					as_list=False
 				)
 				if records:
+					# Apply field transformations if specified
+					if field_transformations:
+						records = apply_field_transformations(records, doctype_name, field_transformations)
+
 					records_count = len(records)
 					insert_sql = generate_insert_statements(table_name, records)
 					sql_statements.extend(insert_sql)
