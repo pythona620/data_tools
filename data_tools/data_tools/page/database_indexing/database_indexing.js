@@ -100,8 +100,9 @@ class DatabaseIndexingPage {
 		`);
 
 		this.setup_handlers();
-		this.load_filter_options();
-		this.load_data();
+		this.load_filter_options().then(() => {
+			this.load_data();
+		});
 	}
 
 	setup_handlers() {
@@ -135,20 +136,14 @@ class DatabaseIndexingPage {
 	clear_all_filters() {
 		this.current_filters = {apps: [], modules: [], doctypes: []};
 
-		// Clear all multi-select controls
-		if (this.filter_controls.apps) {
-			this.filter_controls.apps.set_value([]);
-		}
-		if (this.filter_controls.modules) {
-			this.filter_controls.modules.set_value([]);
-		}
-		if (this.filter_controls.doctypes) {
-			this.filter_controls.doctypes.set_value([]);
-		}
+		// Uncheck all checkboxes and clear pills
+		this.page.main.find('.custom-multiselect input[type="checkbox"]').prop('checked', false);
+		this.page.main.find('.selected-pills').empty();
 
 		// Reload filter options and data
-		this.load_filter_options();
-		this.load_data();
+		this.load_filter_options().then(() => {
+			this.load_data();
+		});
 	}
 
 	switch_tab(tab) {
@@ -170,79 +165,174 @@ class DatabaseIndexingPage {
 			args.apps = JSON.stringify(selected_apps);
 		}
 
-		frappe.call({
-			method: 'data_tools.data_tools.page.database_indexing.database_indexing.get_filter_options',
-			args: args,
-			callback: (r) => {
-				if (r.message) {
-					this.filter_options = r.message;
-					this.populate_filter_controls();
+		console.log('Loading filter options with args:', args);
+
+		return new Promise((resolve) => {
+			frappe.call({
+				method: 'data_tools.data_tools.page.database_indexing.database_indexing.get_filter_options',
+				args: args,
+				callback: (r) => {
+					console.log('Filter options response:', r.message);
+					if (r.message) {
+						this.filter_options = r.message;
+						this.populate_filter_controls();
+					}
+					resolve();
 				}
-			}
+			});
 		});
 	}
 
-	populate_filter_controls() {
-		// Create Apps multi-select
-		if (!this.filter_controls.apps) {
-			this.filter_controls.apps = frappe.ui.form.make_control({
-				parent: this.page.main.find('#filter-apps-container'),
-				df: {
-					fieldtype: 'MultiSelect',
-					options: (this.filter_options.apps || []).map(app => ({label: app, value: app})),
-					change: () => {
-						this.current_filters.apps = this.filter_controls.apps.get_value() || [];
-						// Reload modules and doctypes based on selected apps
-						this.load_filter_options(this.current_filters.apps);
-						// Clear module and doctype selections
-						this.current_filters.modules = [];
-						this.current_filters.doctypes = [];
-						this.load_data();
-					}
-				},
-				render_input: true
+	populate_filter_controls(update_only = null) {
+		const me = this;
+
+		console.log('Populating filter controls with options:', this.filter_options);
+		console.log('Current filter selections:', this.current_filters);
+		console.log('Update only:', update_only);
+
+		// Create or update Apps filter (skip if updating only modules/doctypes)
+		if (!update_only || update_only === 'apps') {
+			this.create_custom_multiselect('apps', this.filter_options.apps || [], '#filter-apps-container', (selected) => {
+				console.log('Apps changed:', selected);
+				me.current_filters.apps = selected;
+
+				// Clear modules and doctypes selections
+				me.current_filters.modules = [];
+				me.current_filters.doctypes = [];
+
+				// Reload filter options based on selected apps, then update only modules and doctypes
+				me.load_filter_options(selected).then(() => {
+					// Update only modules and doctypes, not apps
+					me.populate_filter_controls('dependent');
+					me.load_data();
+				});
 			});
-		} else {
-			this.filter_controls.apps.df.options = (this.filter_options.apps || []).map(app => ({label: app, value: app}));
-			this.filter_controls.apps.refresh();
 		}
 
-		// Create Modules multi-select
-		if (!this.filter_controls.modules) {
-			this.filter_controls.modules = frappe.ui.form.make_control({
-				parent: this.page.main.find('#filter-modules-container'),
-				df: {
-					fieldtype: 'MultiSelect',
-					options: (this.filter_options.modules || []).map(mod => ({label: mod, value: mod})),
-					change: () => {
-						this.current_filters.modules = this.filter_controls.modules.get_value() || [];
-						this.load_data();
-					}
-				},
-				render_input: true
+		// Create or update Modules filter
+		if (!update_only || update_only === 'modules' || update_only === 'dependent') {
+			this.create_custom_multiselect('modules', this.filter_options.modules || [], '#filter-modules-container', (selected) => {
+				console.log('Modules changed:', selected);
+				me.current_filters.modules = selected;
+				me.load_data();
 			});
-		} else {
-			this.filter_controls.modules.df.options = (this.filter_options.modules || []).map(mod => ({label: mod, value: mod}));
-			this.filter_controls.modules.refresh();
 		}
 
-		// Create DocTypes multi-select
-		if (!this.filter_controls.doctypes) {
-			this.filter_controls.doctypes = frappe.ui.form.make_control({
-				parent: this.page.main.find('#filter-doctypes-container'),
-				df: {
-					fieldtype: 'MultiSelect',
-					options: (this.filter_options.doctypes || []).map(dt => ({label: dt, value: dt})),
-					change: () => {
-						this.current_filters.doctypes = this.filter_controls.doctypes.get_value() || [];
-						this.load_data();
-					}
-				},
-				render_input: true
+		// Create or update DocTypes filter
+		if (!update_only || update_only === 'doctypes' || update_only === 'dependent') {
+			this.create_custom_multiselect('doctypes', this.filter_options.doctypes || [], '#filter-doctypes-container', (selected) => {
+				console.log('DocTypes changed:', selected);
+				me.current_filters.doctypes = selected;
+				me.load_data();
 			});
-		} else {
-			this.filter_controls.doctypes.df.options = (this.filter_options.doctypes || []).map(dt => ({label: dt, value: dt}));
-			this.filter_controls.doctypes.refresh();
+		}
+
+		console.log('Controls created successfully');
+	}
+
+	create_custom_multiselect(name, options, container_selector, on_change_callback) {
+		const me = this;
+		const container = this.page.main.find(container_selector);
+		container.empty();
+
+		// Create search input and dropdown
+		const html = `
+			<div class="custom-multiselect" data-name="${name}">
+				<input type="text" class="form-control form-control-sm" placeholder="Search and select..." style="margin-bottom: 5px;">
+				<div class="multiselect-dropdown" style="max-height: 200px; overflow-y: auto; border: 1px solid #d1d8dd; border-radius: 4px; padding: 5px; display: none;">
+					${options.map(opt => `
+						<div class="checkbox" style="margin: 0; padding: 5px;">
+							<label style="font-weight: normal; margin: 0; cursor: pointer;">
+								<input type="checkbox" value="${opt}" data-name="${name}">
+								<span style="margin-left: 5px;">${opt}</span>
+							</label>
+						</div>
+					`).join('')}
+				</div>
+				<div class="selected-pills" style="margin-top: 5px;"></div>
+			</div>
+		`;
+
+		container.html(html);
+
+		const wrapper = container.find('.custom-multiselect');
+		const search_input = wrapper.find('input[type="text"]');
+		const dropdown = wrapper.find('.multiselect-dropdown');
+		const pills_container = wrapper.find('.selected-pills');
+
+		// Show dropdown on focus
+		search_input.on('focus', function() {
+			dropdown.show();
+		});
+
+		// Hide dropdown when clicking outside
+		$(document).on('click', function(e) {
+			if (!$(e.target).closest('.custom-multiselect').length) {
+				wrapper.find('.multiselect-dropdown').hide();
+			}
+		});
+
+		// Search functionality
+		search_input.on('input', function() {
+			const search_term = $(this).val().toLowerCase();
+			dropdown.find('.checkbox').each(function() {
+				const text = $(this).text().toLowerCase();
+				if (text.includes(search_term)) {
+					$(this).show();
+				} else {
+					$(this).hide();
+				}
+			});
+		});
+
+		// Checkbox change handler
+		wrapper.find('input[type="checkbox"]').on('change', function() {
+			me.update_selected_pills(name, container, on_change_callback);
+		});
+
+		// Initial state - restore previous selections
+		if (me.current_filters[name] && me.current_filters[name].length > 0) {
+			me.current_filters[name].forEach(value => {
+				wrapper.find(`input[type="checkbox"][value="${value}"]`).prop('checked', true);
+			});
+			me.update_selected_pills(name, container, on_change_callback, true);
+		}
+	}
+
+	update_selected_pills(name, container, on_change_callback, skip_callback = false) {
+		const wrapper = container.find('.custom-multiselect');
+		const pills_container = wrapper.find('.selected-pills');
+		const checked_boxes = wrapper.find('input[type="checkbox"]:checked');
+
+		// Get selected values
+		const selected = [];
+		checked_boxes.each(function() {
+			selected.push($(this).val());
+		});
+
+		// Update pills display
+		pills_container.empty();
+		selected.forEach(value => {
+			const pill = $(`
+				<span class="badge" style="background-color: #2490ef; color: white; margin-right: 5px; margin-bottom: 3px; display: inline-block; padding: 3px 8px; border-radius: 3px;">
+					${value}
+					<span class="remove-pill" data-value="${value}" data-name="${name}" style="margin-left: 5px; cursor: pointer; font-weight: bold;">&times;</span>
+				</span>
+			`);
+			pills_container.append(pill);
+		});
+
+		// Remove pill handler
+		pills_container.find('.remove-pill').on('click', (e) => {
+			const value = $(e.target).data('value');
+			const name = $(e.target).data('name');
+			wrapper.find(`input[type="checkbox"][value="${value}"]`).prop('checked', false);
+			this.update_selected_pills(name, container, on_change_callback);
+		});
+
+		// Trigger callback
+		if (!skip_callback && on_change_callback) {
+			on_change_callback(selected);
 		}
 	}
 
@@ -261,6 +351,9 @@ class DatabaseIndexingPage {
 		if (this.current_filters.doctypes && this.current_filters.doctypes.length > 0) {
 			filter_args.doctypes = JSON.stringify(this.current_filters.doctypes);
 		}
+
+		console.log('Loading data with filter args:', filter_args);
+		console.log('Current filters:', this.current_filters);
 
 		// Load table-wise indexes
 		frappe.call({
