@@ -16,6 +16,7 @@ class PartialBackupPage {
 		this.export_format = 'json'; // Default format
 		this.include_files = false; // Include file attachments
 		this.field_transformations = []; // Field transformations
+		this.table_transformations = []; // Table name transformations
 		this.selected_apps = []; // Selected apps for filtering
 		this.selected_modules = []; // Selected modules for filtering
 		this.job_id = null; // Track background job
@@ -98,6 +99,24 @@ class PartialBackupPage {
 							</div>
 							<div id="transformations-list" style="max-height: 300px; overflow-y: auto;">
 								<p class="text-muted small">No transformations added yet. Click "Add Transformation" to begin.</p>
+							</div>
+						</div>
+						<div class="form-group">
+							<label>
+								<input type="checkbox" id="enable-table-transformations-checkbox" style="margin-right: 8px;">
+								Enable Table Name Transformations
+							</label>
+							<p class="help-box small text-muted">Rename table names during backup (e.g., change "tabCompeny" to "tabCompany")</p>
+						</div>
+						<div id="table-transformations-section" style="display: none; border: 1px solid #d1d8dd; padding: 15px; border-radius: 4px; background: #f9f9f9; margin-top: 10px;">
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+								<strong>Table Name Transformations</strong>
+								<button class="btn btn-xs btn-success" id="add-table-transformation-btn">
+									<span class="fa fa-plus"></span> Add Table Transformation
+								</button>
+							</div>
+							<div id="table-transformations-list" style="max-height: 300px; overflow-y: auto;">
+								<p class="text-muted small">No table transformations added yet. Click "Add Table Transformation" to begin.</p>
 							</div>
 						</div>
 						<div class="form-group" style="margin-top: 15px;">
@@ -395,7 +414,8 @@ class PartialBackupPage {
 				fieldname: 'export_format',
 				options: [
 					{label: 'JSON (Metadata with records)', value: 'json'},
-					{label: 'SQL (Database dump)', value: 'sql'}
+					{label: 'SQL (Database dump)', value: 'sql'},
+					{label: 'CSV (Records only)', value: 'csv'}
 				],
 				default: 'json',
 				onchange: () => {
@@ -496,6 +516,18 @@ class PartialBackupPage {
 
 		this.page.main.find('#add-transformation-btn').on('click', () => {
 			this.show_add_transformation_dialog();
+		});
+
+		this.page.main.find('#enable-table-transformations-checkbox').on('change', (e) => {
+			if (e.target.checked) {
+				this.page.main.find('#table-transformations-section').slideDown();
+			} else {
+				this.page.main.find('#table-transformations-section').slideUp();
+			}
+		});
+
+		this.page.main.find('#add-table-transformation-btn').on('click', () => {
+			this.show_add_table_transformation_dialog();
 		});
 	}
 
@@ -611,6 +643,91 @@ class PartialBackupPage {
 		container.find('.remove-transformation-btn').on('click', (e) => {
 			const index = parseInt($(e.currentTarget).data('index'));
 			this.remove_transformation(index);
+		});
+	}
+
+	show_add_table_transformation_dialog() {
+		if (!this.selected_doctypes || this.selected_doctypes.length === 0) {
+			frappe.msgprint(__('Please select at least one DocType first'));
+			return;
+		}
+
+		// Create options for old table name dropdown
+		const table_options = this.selected_doctypes.map(dt => {
+			return {
+				label: `tab${dt}`,
+				value: `tab${dt}`
+			};
+		});
+
+		const dialog = new frappe.ui.Dialog({
+			title: __('Add Table Name Transformation'),
+			fields: [
+				{
+					fieldname: 'old_table_name',
+					fieldtype: 'Select',
+					label: __('Old Table Name'),
+					reqd: 1,
+					options: table_options,
+					description: __('Select the current table name from selected DocTypes')
+				},
+				{
+					fieldname: 'new_table_name',
+					fieldtype: 'Data',
+					label: __('New Table Name'),
+					reqd: 1,
+					description: __('Enter the new table name (e.g., "tabCompany")')
+				}
+			],
+			primary_action_label: __('Add'),
+			primary_action: (values) => {
+				this.add_table_transformation(values);
+				dialog.hide();
+			}
+		});
+
+		dialog.show();
+	}
+
+	add_table_transformation(transformation) {
+		this.table_transformations.push(transformation);
+		this.render_table_transformations();
+	}
+
+	remove_table_transformation(index) {
+		this.table_transformations.splice(index, 1);
+		this.render_table_transformations();
+	}
+
+	render_table_transformations() {
+		const container = this.page.main.find('#table-transformations-list');
+		container.empty();
+
+		if (this.table_transformations.length === 0) {
+			container.html('<p class="text-muted small">No table transformations added yet. Click "Add Table Transformation" to begin.</p>');
+			return;
+		}
+
+		this.table_transformations.forEach((transform, index) => {
+			const html = `
+				<div class="transformation-item" style="padding: 10px; margin-bottom: 8px; background: white; border: 1px solid #d1d8dd; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
+					<div>
+						<code style="font-size: 14px;">${transform.old_table_name}</code>
+						<span style="margin: 0 10px;">→</span>
+						<code style="font-size: 14px; color: #2490ef;">${transform.new_table_name}</code>
+					</div>
+					<button class="btn btn-xs btn-danger remove-table-transformation-btn" data-index="${index}">
+						<span class="fa fa-times"></span> Remove
+					</button>
+				</div>
+			`;
+			container.append(html);
+		});
+
+		// Add remove handlers
+		container.find('.remove-table-transformation-btn').on('click', (e) => {
+			const index = parseInt($(e.currentTarget).data('index'));
+			this.remove_table_transformation(index);
 		});
 	}
 
@@ -780,8 +897,15 @@ class PartialBackupPage {
 			? JSON.stringify(this.field_transformations)
 			: null;
 
+		// Prepare table transformations
+		const table_transformations = this.table_transformations.length > 0
+			? JSON.stringify(this.table_transformations)
+			: null;
+
 		console.log('Field transformations:', this.field_transformations);
 		console.log('Transformations JSON:', transformations);
+		console.log('Table transformations:', this.table_transformations);
+		console.log('Table transformations JSON:', table_transformations);
 
 		// Start background job
 		frappe.call({
@@ -790,7 +914,8 @@ class PartialBackupPage {
 				doctypes: this.selected_doctypes,
 				export_format: this.export_format,
 				include_files: this.include_files,
-				field_transformations: transformations
+				field_transformations: transformations,
+				table_transformations: table_transformations
 			},
 			callback: (r) => {
 				if (r.message && r.message.job_id) {
