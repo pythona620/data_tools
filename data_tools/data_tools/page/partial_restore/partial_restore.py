@@ -142,14 +142,15 @@ def start_restore_job(file_data, filename, selected_doctypes=None):
 			'status': 'queued',
 			'progress': 'Restore job queued...'
 		},
-		expires_in_sec=7200  # 2 hours
+		expires_in_sec=50400  # 14 hours (12 hour timeout + 2 hour buffer)
 	)
 
-	# Enqueue background job
+	# Enqueue background job with extended timeout for very large datasets
+	# Increased to 43200 (12 hours) to handle 200+ doctypes with 100GB+ data
 	enqueue(
 		execute_restore_job,
 		queue='long',
-		timeout=3600,  # 1 hour timeout
+		timeout=43200,
 		job_id=job_id,
 		restore_job_id=job_id,
 		file_data=file_data,
@@ -188,7 +189,7 @@ def execute_restore_job(restore_job_id, file_data, filename, selected_doctypes=N
 				'progress': 'Restore completed',
 				'result': result
 			},
-			expires_in_sec=7200
+			expires_in_sec=50400
 		)
 
 	except Exception as e:
@@ -201,7 +202,7 @@ def execute_restore_job(restore_job_id, file_data, filename, selected_doctypes=N
 				'progress': 'Restore failed',
 				'error': str(e)
 			},
-			expires_in_sec=7200
+			expires_in_sec=50400
 		)
 
 
@@ -216,7 +217,7 @@ def update_job_progress(job_id, message):
 	job_data = frappe.cache().get_value(cache_key) or {}
 	job_data['progress'] = message
 	job_data['status'] = 'running'
-	frappe.cache().set_value(cache_key, job_data, expires_in_sec=7200)
+	frappe.cache().set_value(cache_key, job_data, expires_in_sec=50400)
 
 
 @frappe.whitelist()

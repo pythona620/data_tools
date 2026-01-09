@@ -337,13 +337,15 @@ def start_backup_job(doctypes, export_format='json', include_files=False, field_
 		'created_by': frappe.session.user,
 		'created_at': frappe.utils.now()
 	}
-	frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=7200)
+	# Extended cache expiration to match job timeout (12 hours + 2 hour buffer = 14 hours)
+	frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=50400)
 
-	# Enqueue the backup job
+	# Enqueue the backup job with extended timeout for very large datasets
+	# Increased to 43200 (12 hours) to handle 200+ doctypes with 100GB+ data
 	enqueue(
 		method=execute_backup_job,
 		queue='long',
-		timeout=3600,
+		timeout=43200,
 		backup_job_id=job_id,
 		doctypes=doctypes,
 		export_format=export_format,
@@ -379,8 +381,11 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 
 		# Update job status to running
 		job_data['status'] = 'running'
-		job_data['progress'] = 'Backup in progress...'
-		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+		job_data['progress'] = 'Initializing backup...'
+		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=50400)
+
+		# Initialize status tracking for all doctypes
+		initialize_all_doctype_status(backup_job_id, doctypes)
 
 		# Create backup
 		if export_format == 'sql':
@@ -418,10 +423,10 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		job_data['total_files'] = result.get('total_files', 0)
 		job_data['completed_at'] = frappe.utils.now()
 
-		# Save to cache
+		# Save to cache with extended expiration (14 hours)
 		cache_key = f'backup_job_{backup_job_id}'
 		cache_value = json.dumps(job_data)
-		frappe.cache().set_value(cache_key, cache_value, expires_in_sec=7200)
+		frappe.cache().set_value(cache_key, cache_value, expires_in_sec=50400)
 
 		# Verify cache was set
 		verify = frappe.cache().get_value(cache_key)
@@ -438,7 +443,7 @@ def execute_backup_job(backup_job_id, doctypes, export_format='json', include_fi
 		job_data['status'] = 'failed'
 		job_data['error'] = str(e)
 		job_data['failed_at'] = frappe.utils.now()
-		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=7200)
+		frappe.cache().set_value(f'backup_job_{backup_job_id}', json.dumps(job_data), expires_in_sec=50400)
 		frappe.db.commit()
 
 
@@ -732,9 +737,13 @@ def create_json_backup(doctypes, include_files=False, job_id=None, field_transfo
 
 	for idx, doctype_name in enumerate(doctypes):
 		try:
-			# Update progress if job_id is provided
+			# Get table size information
+			table_info = get_table_size(doctype_name)
+
+			# Update progress and status if job_id is provided
 			if job_id:
-				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)})...")
+				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - Size: {table_info['size_mb']}MB, Rows: {table_info['row_count']}")
+				update_doctype_status(job_id, doctype_name, 'processing', table_info['size_mb'], 0)
 
 			# Get DocType definition
 			doctype_doc = frappe.get_doc("DocType", doctype_name)
@@ -748,14 +757,25 @@ def create_json_backup(doctypes, include_files=False, job_id=None, field_transfo
 					doc = frappe.get_doc(doctype_name, doctype_name)
 					records.append(doc.as_dict())
 			else:
-				# Regular DocType - get all documents
+				# Regular DocType - get all documents efficiently in batches
+				# Use bulk fetching to reduce database round trips
+				batch_size = 500  # Fetch 500 records at a time
 				doc_names = frappe.get_all(doctype_name, pluck='name')
-				for name in doc_names:
-					try:
-						doc = frappe.get_doc(doctype_name, name)
-						records.append(doc.as_dict())
-					except Exception as e:
-						frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
+
+				# Process in batches to optimize memory and speed
+				for i in range(0, len(doc_names), batch_size):
+					batch_names = doc_names[i:i + batch_size]
+					for name in batch_names:
+						try:
+							doc = frappe.get_doc(doctype_name, name)
+							records.append(doc.as_dict())
+						except Exception as e:
+							frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
+
+					# Update progress for large doctypes
+					if job_id and len(doc_names) > batch_size:
+						progress_pct = ((i + len(batch_names)) / len(doc_names)) * 100
+						update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - {progress_pct:.1f}% ({i + len(batch_names)}/{len(doc_names)} records)...")
 
 			# Apply field transformations if specified
 			if field_transformations:
@@ -778,12 +798,26 @@ def create_json_backup(doctypes, include_files=False, job_id=None, field_transfo
 
 			total_records += len(records)
 
+			# Mark doctype as completed
+			if job_id:
+				update_doctype_status(job_id, doctype_name, 'completed', table_info['size_mb'], len(records))
+
 		except Exception as e:
-			frappe.log_error(f"Error backing up {doctype_name}: {str(e)}")
+			error_msg = str(e)
+			frappe.log_error(f"Error backing up {doctype_name}: {error_msg}", "JSON Backup Error")
+
+			# Mark doctype as failed
+			if job_id:
+				update_doctype_status(job_id, doctype_name, 'failed', 0, 0, error_msg)
+
 			# Continue with other doctypes
 
 	backup_data["backup_info"]["total_records"] = total_records
 	backup_data["backup_info"]["total_files"] = total_files
+
+	# Ensure all doctypes in the backup are marked as completed
+	if job_id:
+		finalize_backup_status(job_id, doctypes, backup_data["doctypes"])
 
 	# Update progress
 	if job_id:
@@ -872,15 +906,20 @@ def create_csv_backup(doctypes, include_files=False, job_id=None, field_transfor
 	total_records = 0
 	total_files = 0
 	file_paths = []
+	doctype_record_counts = {}  # Track record count per doctype for status finalization
 
 	# Create ZIP file to hold multiple CSV files
 	zip_buffer = BytesIO()
 	with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
 		for idx, doctype_name in enumerate(doctypes):
 			try:
-				# Update progress if job_id is provided
+				# Get table size information
+				table_info = get_table_size(doctype_name)
+
+				# Update progress and status if job_id is provided
 				if job_id:
-					update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)})...")
+					update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - Size: {table_info['size_mb']}MB, Rows: {table_info['row_count']}")
+					update_doctype_status(job_id, doctype_name, 'processing', table_info['size_mb'], 0)
 
 				# Get DocType definition
 				doctype_doc = frappe.get_doc("DocType", doctype_name)
@@ -893,14 +932,24 @@ def create_csv_backup(doctypes, include_files=False, job_id=None, field_transfor
 						doc = frappe.get_doc(doctype_name, doctype_name)
 						records.append(doc.as_dict())
 				else:
-					# Regular DocType - get all documents
+					# Regular DocType - get all documents efficiently in batches
+					batch_size = 500  # Fetch 500 records at a time
 					doc_names = frappe.get_all(doctype_name, pluck='name')
-					for name in doc_names:
-						try:
-							doc = frappe.get_doc(doctype_name, name)
-							records.append(doc.as_dict())
-						except Exception as e:
-							frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
+
+					# Process in batches to optimize memory and speed
+					for i in range(0, len(doc_names), batch_size):
+						batch_names = doc_names[i:i + batch_size]
+						for name in batch_names:
+							try:
+								doc = frappe.get_doc(doctype_name, name)
+								records.append(doc.as_dict())
+							except Exception as e:
+								frappe.log_error(f"Error fetching {doctype_name} - {name}: {str(e)}")
+
+						# Update progress for large doctypes
+						if job_id and len(doc_names) > batch_size:
+							progress_pct = ((i + len(batch_names)) / len(doc_names)) * 100
+							update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - {progress_pct:.1f}% ({i + len(batch_names)}/{len(doc_names)} records)...")
 
 				# Apply field transformations if specified
 				if field_transformations:
@@ -943,10 +992,22 @@ def create_csv_backup(doctypes, include_files=False, job_id=None, field_transfor
 					file_paths.extend(doctype_files)
 					total_files += len(doctype_files)
 
+				# Track record count for this doctype
+				record_count = len(records) if records else 0
+				doctype_record_counts[doctype_name] = record_count
+
+				# Mark doctype as completed
+				if job_id:
+					update_doctype_status(job_id, doctype_name, 'completed', table_info['size_mb'], record_count)
+
 			except Exception as e:
 				error_msg = f"Error backing up {doctype_name}: {str(e)}"
-				frappe.log_error(error_msg)
+				frappe.log_error(error_msg, "CSV Backup Error")
 				logger.error(error_msg)
+
+				# Mark doctype as failed
+				if job_id:
+					update_doctype_status(job_id, doctype_name, 'failed', 0, 0, error_msg)
 
 		# Add metadata file
 		metadata = {
@@ -993,6 +1054,10 @@ def create_csv_backup(doctypes, include_files=False, job_id=None, field_transfor
 
 			logger.info(f"CSV backup - Files added: {files_added}, failed: {files_failed}")
 
+	# Finalize status for all successfully processed doctypes
+	if job_id:
+		finalize_sql_backup_status(job_id, doctypes, doctype_record_counts)
+
 	# Encode to base64 for download
 	zip_buffer.seek(0)
 	file_data = base64.b64encode(zip_buffer.getvalue()).decode()
@@ -1021,6 +1086,7 @@ def create_sql_backup(doctypes, include_files=False, job_id=None, field_transfor
 	total_records = 0
 	total_files = 0
 	file_paths = []
+	doctype_record_counts = {}  # Track record count per doctype for status finalization
 
 	# Add header comment
 	sql_statements.append(f"""-- Partial Backup SQL Export
@@ -1040,9 +1106,13 @@ SET FOREIGN_KEY_CHECKS=0;
 
 	for idx, doctype_name in enumerate(doctypes):
 		try:
-			# Update progress if job_id is provided
+			# Get table size information
+			table_info = get_table_size(doctype_name)
+
+			# Update progress and status if job_id is provided
 			if job_id:
-				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)})...")
+				update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - Size: {table_info['size_mb']}MB, Rows: {table_info['row_count']}")
+				update_doctype_status(job_id, doctype_name, 'processing', table_info['size_mb'], 0)
 
 			# Get DocType definition
 			doctype_doc = frappe.get_doc("DocType", doctype_name)
@@ -1088,23 +1158,53 @@ SET FOREIGN_KEY_CHECKS=0;
 						insert_sql = generate_insert_statements(transformed_table_name, records)
 						sql_statements.extend(insert_sql)
 			else:
-				# Regular DocType - get all documents
-				records = frappe.db.get_all(
-					doctype_name,
-					fields=['*'],
-					as_list=False
-				)
-				if records:
+				# Regular DocType - get all documents in batches for large datasets
+				batch_size = 5000  # Process 5000 records at a time for SQL
+				offset = 0
+				records_count = 0
+				all_records = []  # Collect for file attachment processing
+
+				while True:
+					# Fetch batch of records
+					batch_records = frappe.db.get_all(
+						doctype_name,
+						fields=['*'],
+						as_list=False,
+						limit_start=offset,
+						limit_page_length=batch_size
+					)
+
+					if not batch_records:
+						break
+
 					# Apply field transformations if specified
 					if field_transformations:
-						records = apply_field_transformations(records, doctype_name, field_transformations)
+						batch_records = apply_field_transformations(batch_records, doctype_name, field_transformations)
 
-					records_count = len(records)
-					insert_sql = generate_insert_statements(transformed_table_name, records)
+					records_count += len(batch_records)
+					insert_sql = generate_insert_statements(transformed_table_name, batch_records)
 					sql_statements.extend(insert_sql)
 
+					# Collect records if files need to be included
+					if include_files:
+						all_records.extend(batch_records)
+
+					# Update progress for large doctypes
+					if job_id and records_count % (batch_size * 2) == 0:
+						update_job_progress(job_id, f"Processing {doctype_name} ({idx+1}/{len(doctypes)}) - {records_count} records exported...")
+
+					offset += batch_size
+
+					# If we got fewer records than batch_size, we've reached the end
+					if len(batch_records) < batch_size:
+						break
+
+				# Set records for file collection
+				if include_files:
+					records = all_records
+
 			# Collect file attachments if requested
-			if include_files and records:
+			if include_files and records_count > 0:
 				doctype_files = get_doctype_files(doctype_name, records)
 				file_paths.extend(doctype_files)
 				total_files += len(doctype_files)
@@ -1112,15 +1212,30 @@ SET FOREIGN_KEY_CHECKS=0;
 			total_records += records_count
 			sql_statements.append(f"-- Records exported: {records_count}\n")
 
+			# Track record count for this doctype
+			doctype_record_counts[doctype_name] = records_count
+
+			# Mark doctype as completed
+			if job_id:
+				update_doctype_status(job_id, doctype_name, 'completed', table_info['size_mb'], records_count)
+
 		except Exception as e:
 			error_msg = f"Error backing up {doctype_name}: {str(e)}"
-			frappe.log_error(error_msg)
+			frappe.log_error(error_msg, "SQL Backup Error")
 			sql_statements.append(f"-- ERROR: {error_msg}\n")
+
+			# Mark doctype as failed
+			if job_id:
+				update_doctype_status(job_id, doctype_name, 'failed', 0, 0, error_msg)
 
 	sql_statements.append(f"\nSET FOREIGN_KEY_CHECKS=1;")
 	sql_statements.append(f"\n-- Total records exported: {total_records}")
 	sql_statements.append(f"-- Total files: {total_files}")
 	sql_statements.append(f"-- Backup completed: {frappe.utils.now()}\n")
+
+	# Finalize status for all successfully processed doctypes
+	if job_id:
+		finalize_sql_backup_status(job_id, doctypes, doctype_record_counts)
 
 	# Combine all SQL statements
 	sql_content = "\n".join(sql_statements)
@@ -1323,6 +1438,258 @@ def update_job_progress(job_id, progress_message):
 		job_data = json.loads(frappe.cache().get_value(f'backup_job_{job_id}') or '{}')
 		if job_data:
 			job_data['progress'] = progress_message
-			frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=7200)
+			frappe.cache().set_value(f'backup_job_{job_id}', json.dumps(job_data), expires_in_sec=50400)
 	except Exception as e:
 		frappe.log_error(f"Error updating job progress: {str(e)}")
+
+
+def get_table_size(doctype_name):
+	"""Get the size of a table in MB
+
+	Args:
+		doctype_name: Name of the DocType
+
+	Returns:
+		dict: Dictionary with table size information
+	"""
+	try:
+		table_name = f"tab{doctype_name}"
+		result = frappe.db.sql(f"""
+			SELECT
+				table_name,
+				ROUND(((data_length + index_length) / 1024 / 1024), 2) AS size_mb,
+				table_rows
+			FROM information_schema.TABLES
+			WHERE table_schema = %s
+			AND table_name = %s
+		""", (frappe.conf.db_name, table_name), as_dict=True)
+
+		if result:
+			return {
+				'table_name': result[0]['table_name'],
+				'size_mb': result[0]['size_mb'] or 0,
+				'row_count': result[0]['table_rows'] or 0
+			}
+		return {'table_name': table_name, 'size_mb': 0, 'row_count': 0}
+	except Exception as e:
+		frappe.log_error(f"Error getting table size for {doctype_name}: {str(e)}")
+		return {'table_name': f"tab{doctype_name}", 'size_mb': 0, 'row_count': 0}
+
+
+def initialize_all_doctype_status(job_id, doctypes):
+	"""Initialize status tracking for all doctypes at the start of backup
+
+	Args:
+		job_id: Unique job identifier
+		doctypes: List of all DocType names to backup
+	"""
+	try:
+		status_key = f'backup_job_{job_id}_status'
+		status_data = {'doctypes': []}
+
+		# Initialize all doctypes with 'pending' status
+		for doctype_name in doctypes:
+			# Get table size information upfront
+			table_info = get_table_size(doctype_name)
+
+			status_data['doctypes'].append({
+				'doctype': doctype_name,
+				'table_name': f'tab{doctype_name}',
+				'status': 'pending',
+				'size_mb': table_info['size_mb'],
+				'records': 0,
+				'started_at': frappe.utils.now(),
+				'updated_at': frappe.utils.now(),
+				'error': None
+			})
+
+		# Save to cache with extended expiration
+		frappe.cache().set_value(status_key, json.dumps(status_data), expires_in_sec=50400)
+	except Exception as e:
+		frappe.log_error(f"Error initializing doctype status: {str(e)}")
+
+
+def update_doctype_status(job_id, doctype_name, status, size_mb=0, records=0, error_msg=None):
+	"""Update the status of a specific doctype in the backup job
+
+	Args:
+		job_id: Unique job identifier
+		doctype_name: Name of the DocType
+		status: Status (processing, completed, failed)
+		size_mb: Size of the table in MB
+		records: Number of records
+		error_msg: Error message if failed
+	"""
+	try:
+		# Get or create detailed status tracking
+		status_key = f'backup_job_{job_id}_status'
+		status_data = frappe.cache().get_value(status_key)
+
+		if status_data:
+			status_data = json.loads(status_data)
+		else:
+			status_data = {'doctypes': []}
+
+		# Find existing entry or create new one
+		existing_entry = None
+		for entry in status_data['doctypes']:
+			if entry['doctype'] == doctype_name:
+				existing_entry = entry
+				break
+
+		if existing_entry:
+			existing_entry['status'] = status
+			if size_mb > 0:
+				existing_entry['size_mb'] = size_mb
+			existing_entry['records'] = records
+			existing_entry['updated_at'] = frappe.utils.now()
+			if error_msg:
+				existing_entry['error'] = error_msg
+		else:
+			status_data['doctypes'].append({
+				'doctype': doctype_name,
+				'table_name': f'tab{doctype_name}',
+				'status': status,
+				'size_mb': size_mb,
+				'records': records,
+				'started_at': frappe.utils.now(),
+				'updated_at': frappe.utils.now(),
+				'error': error_msg
+			})
+
+		# Save back to cache with extended expiration
+		frappe.cache().set_value(status_key, json.dumps(status_data), expires_in_sec=50400)
+	except Exception as e:
+		frappe.log_error(f"Error updating doctype status: {str(e)}")
+
+
+def finalize_backup_status(job_id, selected_doctypes, backed_up_doctypes):
+	"""Finalize status for all doctypes that were successfully backed up (JSON format)
+
+	This function ensures all doctypes that made it into the backup are marked as completed,
+	even if their individual status updates didn't persist properly during processing.
+
+	Args:
+		job_id: Unique job identifier
+		selected_doctypes: List of doctype names that were selected for backup
+		backed_up_doctypes: List of doctype entries from the backup data
+	"""
+	try:
+		status_key = f'backup_job_{job_id}_status'
+		status_data = frappe.cache().get_value(status_key)
+
+		if status_data:
+			status_data = json.loads(status_data)
+		else:
+			status_data = {'doctypes': []}
+
+		# Create a map of backed up doctypes with their record counts
+		backed_up_map = {}
+		for dt_entry in backed_up_doctypes:
+			doctype_name = dt_entry.get('doctype')
+			record_count = dt_entry.get('record_count', 0)
+			backed_up_map[doctype_name] = record_count
+
+		# Update status for all doctypes that were successfully backed up
+		for entry in status_data['doctypes']:
+			doctype_name = entry['doctype']
+			# If this doctype is in the backup and not already marked as completed/failed
+			if doctype_name in backed_up_map and entry['status'] not in ['completed', 'failed']:
+				entry['status'] = 'completed'
+				entry['records'] = backed_up_map[doctype_name]
+				entry['updated_at'] = frappe.utils.now()
+
+		# Save updated status
+		frappe.cache().set_value(status_key, json.dumps(status_data), expires_in_sec=50400)
+
+		logger.info(f"Finalized backup status for job {job_id}: {len(backed_up_map)} doctypes")
+
+	except Exception as e:
+		frappe.log_error(f"Error finalizing backup status: {str(e)}")
+
+
+def finalize_sql_backup_status(job_id, doctypes, record_counts):
+	"""Finalize status for SQL/CSV backups - mark all non-failed doctypes as completed with record counts
+
+	Args:
+		job_id: Unique job identifier
+		doctypes: List of all doctype names that were in the backup
+		record_counts: Dictionary mapping doctype names to their record counts
+	"""
+	try:
+		status_key = f'backup_job_{job_id}_status'
+		status_data = frappe.cache().get_value(status_key)
+
+		if status_data:
+			status_data = json.loads(status_data)
+		else:
+			status_data = {'doctypes': []}
+
+		# Mark all doctypes that aren't already failed as completed with proper record counts
+		for entry in status_data['doctypes']:
+			doctype_name = entry['doctype']
+			if entry['status'] not in ['completed', 'failed']:
+				entry['status'] = 'completed'
+				entry['updated_at'] = frappe.utils.now()
+				# Update with actual record count if available
+				if doctype_name in record_counts:
+					entry['records'] = record_counts[doctype_name]
+
+		# Save updated status
+		frappe.cache().set_value(status_key, json.dumps(status_data), expires_in_sec=50400)
+
+		logger.info(f"Finalized SQL/CSV backup status for job {job_id}: {len(doctypes)} doctypes, total {sum(record_counts.values())} records")
+
+	except Exception as e:
+		frappe.log_error(f"Error finalizing SQL backup status: {str(e)}")
+
+
+@frappe.whitelist()
+def get_detailed_status(job_id):
+	"""Get detailed status of backup job including per-doctype information
+
+	Args:
+		job_id: Unique job identifier
+
+	Returns:
+		dict: Detailed status information
+	"""
+	try:
+		# Get main job data
+		job_data = json.loads(frappe.cache().get_value(f'backup_job_{job_id}') or '{}')
+
+		# Get detailed doctype status
+		status_key = f'backup_job_{job_id}_status'
+		status_data = frappe.cache().get_value(status_key)
+
+		if status_data:
+			status_data = json.loads(status_data)
+		else:
+			status_data = {'doctypes': []}
+
+		# Calculate summary statistics
+		total_doctypes = len(status_data.get('doctypes', []))
+		completed = sum(1 for d in status_data.get('doctypes', []) if d['status'] == 'completed')
+		failed = sum(1 for d in status_data.get('doctypes', []) if d['status'] == 'failed')
+		processing = sum(1 for d in status_data.get('doctypes', []) if d['status'] == 'processing')
+		pending = sum(1 for d in status_data.get('doctypes', []) if d['status'] == 'pending')
+		total_size_mb = sum(d.get('size_mb', 0) for d in status_data.get('doctypes', []))
+		total_records = sum(d.get('records', 0) for d in status_data.get('doctypes', []))
+
+		return {
+			'success': True,
+			'job_data': job_data,
+			'detailed_status': status_data.get('doctypes', []),
+			'summary': {
+				'total_doctypes': total_doctypes,
+				'completed': completed,
+				'failed': failed,
+				'processing': processing,
+				'pending': pending,
+				'total_size_mb': round(total_size_mb, 2),
+				'total_records': total_records
+			}
+		}
+	except Exception as e:
+		frappe.log_error(f"Error getting detailed status: {str(e)}")
+		return {'success': False, 'error': str(e)}

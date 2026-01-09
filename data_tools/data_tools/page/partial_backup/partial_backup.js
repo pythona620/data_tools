@@ -127,7 +127,60 @@ class PartialBackupPage {
 						</div>
 					</div>
 				</div>
+
+				<!-- Status Table -->
+				<div class="frappe-card" id="status-table-card" style="display: none; margin-top: 20px;">
+					<div class="frappe-card-head">
+						<h4>Backup Progress - Detailed Status</h4>
+						<p class="text-muted small" style="margin: 5px 0 0 0;" id="status-summary"></p>
+					</div>
+					<div class="frappe-card-body">
+						<div id="status-table-container" style="overflow-x: auto; max-height: 500px; overflow-y: auto;">
+							<table class="table table-bordered" id="status-table">
+								<thead style="position: sticky; top: 0; background: white; z-index: 10;">
+									<tr>
+										<th style="width: 5%;">#</th>
+										<th style="width: 25%;">DocType</th>
+										<th style="width: 25%;">Table Name</th>
+										<th style="width: 12%;">Size (MB)</th>
+										<th style="width: 12%;">Records</th>
+										<th style="width: 11%;">Status</th>
+										<th style="width: 10%;">Time</th>
+									</tr>
+								</thead>
+								<tbody id="status-table-body">
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
 			</div>
+
+			<style>
+				.status-row-pending {
+					background-color: #f5f5f5 !important;
+				}
+				.status-row-processing {
+					background-color: #e8f4fd !important;
+				}
+				.status-row-completed {
+					background-color: #f0f8ed !important;
+				}
+				.status-row-failed {
+					background-color: #ffe8e8 !important;
+				}
+				#status-table {
+					font-size: 0.95em;
+				}
+				#status-table th {
+					background-color: #f8f9fa;
+					font-weight: 600;
+					border-bottom: 2px solid #dee2e6;
+				}
+				#status-table td {
+					vertical-align: middle;
+				}
+			</style>
 		`);
 
 		this.load_apps();
@@ -943,16 +996,27 @@ class PartialBackupPage {
 	poll_job_status() {
 		const status_elem = this.page.main.find('#backup-status');
 
+		// Show the status table
+		this.page.main.find('#status-table-card').show();
+
 		const check_status = () => {
+			// Get detailed status
 			frappe.call({
-				method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_job_status',
+				method: 'data_tools.data_tools.page.partial_backup.partial_backup.get_detailed_status',
 				args: {
 					job_id: this.job_id
 				},
 				callback: (r) => {
-					if (r.message) {
-						const status = r.message.status;
-						const progress = r.message.progress;
+					if (r.message && r.message.success) {
+						const job_data = r.message.job_data;
+						const detailed_status = r.message.detailed_status;
+						const summary = r.message.summary;
+
+						// Update status table
+						this.update_status_table(detailed_status, summary);
+
+						const status = job_data.status;
+						const progress = job_data.progress;
 
 						if (status === 'completed') {
 							// Job completed - download the file
@@ -967,7 +1031,7 @@ class PartialBackupPage {
 							status_elem.html(
 								`<span class="text-danger">
 									<span class="fa fa-times"></span>
-									Backup failed: ${r.message.error || 'Unknown error'}
+									Backup failed: ${job_data.error || 'Unknown error'}
 								</span>`
 							);
 							frappe.msgprint(__('Backup failed. Please check the error log.'));
@@ -999,6 +1063,70 @@ class PartialBackupPage {
 
 		// Start checking status
 		check_status();
+	}
+
+	update_status_table(detailed_status, summary) {
+		const tbody = this.page.main.find('#status-table-body');
+		const summary_elem = this.page.main.find('#status-summary');
+
+		// Update summary
+		if (summary) {
+			const pending_text = summary.pending > 0 ? `Pending: <strong class="text-muted">${summary.pending}</strong> | ` : '';
+			summary_elem.html(`
+				Total: <strong>${summary.total_doctypes}</strong> doctypes |
+				Completed: <strong class="text-success">${summary.completed}</strong> |
+				Processing: <strong class="text-primary">${summary.processing}</strong> |
+				${pending_text}Failed: <strong class="text-danger">${summary.failed}</strong> |
+				Size: <strong>${summary.total_size_mb} MB</strong> |
+				Records: <strong>${summary.total_records.toLocaleString()}</strong>
+			`);
+		}
+
+		// Update table
+		tbody.empty();
+
+		if (!detailed_status || detailed_status.length === 0) {
+			tbody.append('<tr><td colspan="7" class="text-center text-muted">No status data available yet...</td></tr>');
+			return;
+		}
+
+		detailed_status.forEach((item, index) => {
+			const status_badge = this.get_status_badge(item.status);
+			const time_display = item.updated_at ? this.format_time(item.updated_at) : '-';
+			const error_icon = item.error ? `<span class="fa fa-exclamation-circle text-danger" title="${item.error}"></span>` : '';
+
+			const row = `
+				<tr class="status-row-${item.status}">
+					<td>${index + 1}</td>
+					<td><strong>${item.doctype}</strong> ${error_icon}</td>
+					<td><code>${item.table_name}</code></td>
+					<td class="text-right">${item.size_mb.toFixed(2)}</td>
+					<td class="text-right">${item.records.toLocaleString()}</td>
+					<td>${status_badge}</td>
+					<td class="text-muted small">${time_display}</td>
+				</tr>
+			`;
+			tbody.append(row);
+		});
+	}
+
+	get_status_badge(status) {
+		const badges = {
+			'processing': '<span class="badge" style="background-color: #2490ef; color: white;"><span class="fa fa-spinner fa-spin"></span> Processing</span>',
+			'completed': '<span class="badge" style="background-color: #98d85b; color: white;"><span class="fa fa-check"></span> Completed</span>',
+			'failed': '<span class="badge" style="background-color: #ff5858; color: white;"><span class="fa fa-times"></span> Failed</span>',
+			'pending': '<span class="badge" style="background-color: #95aac9; color: white;"><span class="fa fa-clock-o"></span> Pending</span>'
+		};
+		return badges[status] || '<span class="badge">Unknown</span>';
+	}
+
+	format_time(timestamp) {
+		try {
+			const date = new Date(timestamp);
+			return date.toLocaleTimeString();
+		} catch (e) {
+			return timestamp;
+		}
 	}
 
 	download_backup(job_id) {
